@@ -36,6 +36,7 @@ opencl-sys = { version = "0.6.5", default-features = false }
 log = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 cubecl-core = { workspace = true, default-features = true, features = ["export_tests"] }

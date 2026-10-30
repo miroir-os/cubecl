@@ -11,8 +11,8 @@ use cubecl_server::compiler::{ArtifactId, ArtifactStore, CompilationError, Compi
 #[derive(Debug)]
 pub(crate) struct OpenClPrograms {
     compiler: OpenClArtifactCompiler,
-    /// Sources kept between runs, which saves the compilation to `OpenCL` C; the driver still
-    /// builds the program from them.
+    /// Programs kept between runs, as their source and the device binary the driver built: a
+    /// stored kernel is loaded without compiling it again, to `OpenCL` C or by the driver.
     store: ArtifactStore<OpenClCacheEntry>,
 }
 
