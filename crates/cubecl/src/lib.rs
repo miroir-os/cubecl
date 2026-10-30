@@ -103,6 +103,9 @@ pub use cubecl_cpu as cpu;
 #[cfg(feature = "metal")]
 pub use cubecl_metal as metal;
 
+#[cfg(feature = "opencl")]
+pub use cubecl_opencl as opencl;
+
 /// The runtime this build tests on.
 #[cfg(test_runtime_default)]
 pub type TestRuntime = cubecl_wgpu::WgpuRuntime;
