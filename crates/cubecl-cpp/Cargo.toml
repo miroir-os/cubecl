@@ -25,6 +25,7 @@ default = [
 ]
 hip = []
 metal = []
+opencl = []
 pliron-dump = ["std"]
 std = [
     "cubecl-runtime/std",

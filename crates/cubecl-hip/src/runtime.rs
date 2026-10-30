@@ -223,6 +223,7 @@ impl DeviceService for HipServer {
                     ..Default::default()
                 },
                 amd_wmma: gfx.wmma(),
+                ..Default::default()
             },
             arch: Some(gfx),
             target: probe.arch_name.clone(),

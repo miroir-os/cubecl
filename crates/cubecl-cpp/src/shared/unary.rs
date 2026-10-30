@@ -203,6 +203,8 @@ shared_op_with_out!(LeadingZerosBitsOp, |op, ctx| {
     }
 });
 unrolling!(LeadingZerosBitsOp);
+// Lowered on CUDA / HIP; Metal and OpenCL have `ctz`.
+unrolling!(TrailingZerosBitsOp);
 
 shared_op_with_out!(FindFirstSetOp, |op, ctx| {
     let input = op.input(ctx);
@@ -323,7 +325,7 @@ lower_unop!(Log1pOp, log1p);
 lower_unop!(DegreesOp, to_degrees);
 lower_unop!(RadiansOp, to_radians);
 lower_unop!(FindFirstSetOp, find_first_set, |_, ctx| {
-    ctx.target() == Target::Metal
+    matches!(ctx.target(), Target::Metal | Target::OpenCl)
 });
 lower_unop!(TrailingZerosBitsOp, trailing_zeros, |_, ctx| {
     matches!(ctx.target(), Target::Cuda | Target::Hip)
