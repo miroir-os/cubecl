@@ -1,4 +1,3 @@
-use cubecl_common::device::{Device, DeviceId};
 use opencl_sys::{
     CL_DEVICE_EXTENSIONS, CL_DEVICE_OPENCL_C_ALL_VERSIONS, CL_DEVICE_OPENCL_C_FEATURES,
     CL_DEVICE_PLATFORM, CL_DEVICE_SVM_CAPABILITIES, CL_DEVICE_SVM_COARSE_GRAIN_BUFFER,
@@ -6,34 +5,7 @@ use opencl_sys::{
     cl_device_info, cl_name_version, cl_platform_id,
 };
 
-/// A device of the `OpenCL` runtime, named by its index among the devices it can use ([`devices`]):
-/// the default, 0, is the first GPU when there is one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct OpenClDevice {
-    pub index: usize,
-}
-
-impl OpenClDevice {
-    /// How many devices the runtime can use: `OpenClDevice { index }` for every `index` below it.
-    pub fn count() -> usize {
-        devices().len()
-    }
-}
-
-impl Device for OpenClDevice {
-    fn from_id(device_id: DeviceId) -> Self {
-        Self {
-            index: device_id.index_id as usize,
-        }
-    }
-
-    fn to_id(&self) -> DeviceId {
-        DeviceId {
-            type_id: 0,
-            index_id: self.index.min(u16::MAX as usize) as u16,
-        }
-    }
-}
+pub use cubecl_server::device::OpenClDevice;
 
 /// Every device the runtime can use ([`Info::usable`]) on every `OpenCL` platform the loader lists:
 /// GPUs first.
@@ -49,7 +21,7 @@ pub(crate) fn devices() -> Vec<cl_device_id> {
         })
         .filter(|&device| Info(device).usable())
         .collect();
-    devices.sort_by_key(|&device| Info(device).u64(CL_DEVICE_TYPE) & CL_DEVICE_TYPE_GPU == 0);
+    devices.sort_by_key(|&device| !Info(device).is_gpu());
     devices
 }
 
@@ -57,6 +29,10 @@ pub(crate) fn devices() -> Vec<cl_device_id> {
 pub(crate) struct Info(pub cl_device_id);
 
 impl Info {
+    pub fn is_gpu(&self) -> bool {
+        self.u64(CL_DEVICE_TYPE) & CL_DEVICE_TYPE_GPU != 0
+    }
+
     fn data(&self, param: cl_device_info) -> Vec<u8> {
         cl3::device::get_device_data(self.0, param).unwrap_or_default()
     }
