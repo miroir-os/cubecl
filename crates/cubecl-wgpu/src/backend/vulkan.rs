@@ -62,31 +62,16 @@ pub async fn try_request_vulkan_device(
     adapter: &wgpu::Adapter,
 ) -> Result<Option<(wgpu::Device, wgpu::Queue)>, crate::WgpuInitError> {
     let limits = adapter.limits();
-    // Compute needs none of the graphics-only features, and requesting them
-    // all fails the device's creation with some drivers (NVIDIA 595).
-    let graphics = adapter
-        .features()
-        .iter_names()
-        .filter(|(name, _)| {
-            [
-                "RAY",
-                "MESH",
-                "ACCELERATION",
-                "CONSERVATIVE",
-                "BARYCENTRIC",
-                "MULTIVIEW",
-                "POLYGON",
-                "MULTI_DRAW",
-                "INDIRECT",
-            ]
-            .iter()
-            .any(|kind| name.contains(kind))
-        })
-        .fold(Features::empty(), |all, (_, feature)| all | feature);
+    // Compute traces no rays, and requesting ray tracing fails the device's creation on
+    // NVIDIA's 595 driver.
     let features = adapter
         .features()
         .difference(Features::MAPPABLE_PRIMARY_BUFFERS)
-        .difference(graphics);
+        .difference(
+            Features::EXPERIMENTAL_RAY_QUERY
+                | Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN
+                | Features::EXPERIMENTAL_RAY_TRACING_PIPELINES,
+        );
     unsafe {
         let hal_adapter = adapter.as_hal::<hal::api::Vulkan>().ok_or_else(|| {
             crate::WgpuInitError::InvalidConfiguration {
