@@ -69,8 +69,15 @@ pub async fn try_request_vulkan_device(
         .iter_names()
         .filter(|(name, _)| {
             [
-                "RAY", "MESH", "ACCELERATION", "CONSERVATIVE", "BARYCENTRIC", "MULTIVIEW",
-                "POLYGON", "MULTI_DRAW", "INDIRECT",
+                "RAY",
+                "MESH",
+                "ACCELERATION",
+                "CONSERVATIVE",
+                "BARYCENTRIC",
+                "MULTIVIEW",
+                "POLYGON",
+                "MULTI_DRAW",
+                "INDIRECT",
             ]
             .iter()
             .any(|kind| name.contains(kind))
