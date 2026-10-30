@@ -135,6 +135,13 @@ impl<C: WgpuCompiler> ArtifactCompiler for WgpuArtifactCompiler<C> {
         artifact.pipeline = Some(self.build(id, &artifact)?);
         Ok(artifact)
     }
+
+    /// Builds a stored kernel's pipeline, which the store does not keep.
+    fn prepare(&self, id: &ArtifactId<MetadataLayout>, artifact: &mut WgpuArtifact) {
+        if artifact.pipeline.is_none() {
+            artifact.pipeline = self.build(id, artifact).ok();
+        }
+    }
 }
 
 impl<C> WgpuArtifactCompiler<C> {

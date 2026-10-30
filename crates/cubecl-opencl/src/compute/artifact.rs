@@ -237,6 +237,13 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
             kernel: Some(kernel),
         })
     }
+
+    /// Loads a stored kernel's program, which the store keeps as its binary and source.
+    fn prepare(&self, _id: &ArtifactId<()>, artifact: &mut OpenClArtifact) {
+        if artifact.kernel.is_none() {
+            artifact.kernel = self.load(&artifact.entry).ok();
+        }
+    }
 }
 
 impl OpenClArtifactCompiler {
