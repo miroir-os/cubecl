@@ -14,21 +14,14 @@ use cubecl_server::kernel::{BufferIOAttr, CompiledKernel, CubeKernel, DebugInfor
 use cubecl_server::logging::ServerLogger;
 use cubecl_server::validation::{validate_cube_dim, validate_shared_memory, validate_units};
 use opencl_sys::{
-    CL_KERNEL_PROGRAM, CL_KERNEL_SPILL_MEM_SIZE_INTEL, CL_KERNEL_WORK_GROUP_SIZE,
-    CL_PROGRAM_BINARIES, CL_PROGRAM_BUILD_LOG, cl_context, cl_device_id, cl_kernel,
-    cl_kernel_work_group_info, cl_program,
+    CL_KERNEL_PROGRAM, CL_PROGRAM_BINARIES, CL_PROGRAM_BUILD_LOG, cl_context, cl_device_id,
+    cl_kernel, cl_program,
 };
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
-/// Spill (bytes per thread) beyond which a kernel without cooperative matrices is rebuilt with more
-/// registers per thread: a little spill costs less than the threads the larger register file takes.
-const SPILL_LIMIT: u64 = 4096;
-
-/// The build options every kernel gets: `OpenCL` C 3.0, and unsuffixed literals (the shared emission
-/// writes them as doubles) in single precision. That narrows `double` constants too, harmless while
-/// the runtime registers no `f64`.
-const OPTIONS: &str = "-cl-std=CL3.0 -cl-single-precision-constant";
+/// The build options every kernel gets: `OpenCL` C 3.0.
+const OPTIONS: &CStr = c"-cl-std=CL3.0";
 
 /// A kernel object, released with the last clone.
 #[derive(Debug)]
@@ -79,7 +72,6 @@ pub(crate) struct OpenClCacheEntry {
     io: Option<Vec<BufferIOAttr>>,
     has_dynamic_meta: bool,
     has_info: bool,
-    uses_mma: bool,
 }
 
 /// `OpenCL` C, and the kernel finalizing built from it.
@@ -101,10 +93,6 @@ pub(crate) struct OpenClArtifactCompiler {
     device: cl_device_id,
     properties: DeviceProperties,
     options: cubecl_cpp::shared::CompilationOptions,
-    build_options: CString,
-    /// Intel GPUs: the options of a kernel rebuilt where the default register file spills (256
-    /// registers per thread instead of 128, half the threads per core).
-    large_registers: Option<CString>,
 }
 
 // SAFETY: the context and device are thread-safe `OpenCL` handles, the context retained by this
@@ -125,7 +113,6 @@ impl OpenClArtifactCompiler {
         device: cl_device_id,
         properties: DeviceProperties,
         options: cubecl_cpp::shared::CompilationOptions,
-        large_registers: bool,
     ) -> Self {
         // A reference of the compiler's own: it may outlive the server on a compiling thread.
         cl::api().clRetainContext(context);
@@ -134,11 +121,6 @@ impl OpenClArtifactCompiler {
             device,
             properties,
             options,
-            build_options: CString::new(OPTIONS).expect("no interior NUL"),
-            large_registers: large_registers.then(|| {
-                CString::new(format!("{OPTIONS} -cl-intel-256-GRF-per-thread"))
-                    .expect("no interior NUL")
-            }),
         }
     }
 
@@ -147,16 +129,11 @@ impl OpenClArtifactCompiler {
     pub(crate) fn load(&self, entry: &OpenClCacheEntry) -> Result<OpenClKernel, CompilationError> {
         let cube_dim = entry.cube_dim.into();
         let kernel = match self.load_binary(&entry.binary, &entry.entrypoint_name) {
-            Some(kernel) => Arc::new(kernel),
-            None => self.build(
-                &entry.source,
-                &entry.entrypoint_name,
-                cube_dim,
-                entry.uses_mma,
-            )?,
+            Some(kernel) => kernel,
+            None => self.build(&entry.source, &entry.entrypoint_name)?,
         };
         Ok(OpenClKernel {
-            kernel,
+            kernel: Arc::new(kernel),
             cube_dim,
             io: entry.io.clone().map(Arc::from),
             has_dynamic_meta: entry.has_dynamic_meta,
@@ -217,8 +194,7 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
                 reason: "the OpenCL compiler returned no kernel representation".into(),
                 backtrace: BackTrace::capture(),
             })?;
-        let (has_dynamic_meta, has_info, uses_mma) =
-            (repr.has_dynamic_meta, repr.has_info, repr.uses_mma);
+        let (has_dynamic_meta, has_info) = (repr.has_dynamic_meta, repr.has_info);
         let cube_dim = lowered.cube_dim;
         let mut entry = OpenClCacheEntry {
             io: lowered.io.take(),
@@ -228,7 +204,6 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
             binary: Vec::new(),
             has_dynamic_meta,
             has_info,
-            uses_mma,
         };
         let kernel = self.load(&entry)?;
         entry.binary = binary(&kernel.kernel).unwrap_or_default();
@@ -247,42 +222,6 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
 }
 
 impl OpenClArtifactCompiler {
-    /// Builds `source` for this compiler's device and takes its kernel `entrypoint_name`: on Intel GPUs with
-    /// 256 registers per thread where 128 spill (any spill for a kernel holding cooperative matrices, whose
-    /// accumulators live in registers; past [`SPILL_LIMIT`] for the others) and the larger build still runs
-    /// `cube_dim`'s units. A kernel that cannot run that many is refused at launch.
-    fn build(
-        &self,
-        source: &str,
-        entrypoint_name: &str,
-        cube_dim: CubeDim,
-        uses_mma: bool,
-    ) -> Result<Arc<KernelHandle>, CompilationError> {
-        let kernel = self.build_with(source, entrypoint_name, &self.build_options)?;
-        let limit = if uses_mma { 0 } else { SPILL_LIMIT };
-        let spill = self.spill_bytes(&kernel);
-        let units = cube_dim.num_elems();
-        let kernel = self
-            .wider(source, entrypoint_name, spill, limit, units)
-            .unwrap_or(kernel);
-        Ok(Arc::new(kernel))
-    }
-
-    /// The kernel built with the larger register file (Intel) when `spill` bytes are past `limit`,
-    /// if it spills less and still runs `units` units.
-    fn wider(
-        &self,
-        source: &str,
-        entrypoint_name: &str,
-        spill: u64,
-        limit: u64,
-        units: u32,
-    ) -> Option<KernelHandle> {
-        let options = self.large_registers.as_ref().filter(|_| spill > limit)?;
-        let wide = self.build_with(source, entrypoint_name, options).ok()?;
-        (self.spill_bytes(&wide) < spill && self.max_units(&wide) >= units).then_some(wide)
-    }
-
     /// The kernel `entrypoint_name` of the program the driver loads from `binary`, if it takes it.
     fn load_binary(&self, binary: &[u8], entrypoint_name: &str) -> Option<KernelHandle> {
         if binary.is_empty() {
@@ -304,36 +243,9 @@ impl OpenClArtifactCompiler {
         kernel
     }
 
-    fn work_group_info(
-        &self,
-        kernel: &KernelHandle,
-        param: cl_kernel_work_group_info,
-    ) -> Option<u64> {
-        let bytes = cl3::kernel::get_kernel_work_group_data(kernel.0, self.device, param).ok()?;
-        Some(crate::device::word(&bytes))
-    }
-
-    /// The register spill of `kernel` (Intel), 0 where the device does not say.
-    fn spill_bytes(&self, kernel: &KernelHandle) -> u64 {
-        self.work_group_info(
-            kernel,
-            CL_KERNEL_SPILL_MEM_SIZE_INTEL as cl_kernel_work_group_info,
-        )
-        .unwrap_or(0)
-    }
-
-    /// The most work-items a work-group of `kernel` may have on this device.
-    fn max_units(&self, kernel: &KernelHandle) -> u32 {
-        self.work_group_info(kernel, CL_KERNEL_WORK_GROUP_SIZE)
-            .map_or(u32::MAX, |units| units.min(u32::MAX as u64) as u32)
-    }
-
-    fn build_with(
-        &self,
-        source: &str,
-        entrypoint_name: &str,
-        options: &CString,
-    ) -> Result<KernelHandle, CompilationError> {
+    /// Builds `source` for this compiler's device and takes its kernel `entrypoint_name`. A kernel
+    /// that cannot run its cube's units is refused at launch.
+    fn build(&self, source: &str, entrypoint_name: &str) -> Result<KernelHandle, CompilationError> {
         let generic = |reason: String| CompilationError::Generic {
             reason,
             backtrace: BackTrace::capture(),
@@ -343,7 +255,7 @@ impl OpenClArtifactCompiler {
         let built = cl3::program::build_program(
             program,
             &[self.device],
-            options,
+            OPTIONS,
             None,
             std::ptr::null_mut(),
         );

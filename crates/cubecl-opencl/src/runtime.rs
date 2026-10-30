@@ -116,7 +116,7 @@ impl DeviceService for OpenClServer {
         let (platform, driver) = (info.platform(), info.string(CL_DRIVER_VERSION));
         let namespace = format!("{platform}/{name}/{driver}/plane{plane:?}/dpas{dpas}");
         let properties = (*utilities.properties).clone();
-        let compiler = OpenClArtifactCompiler::new(context, device, properties, options, intel);
+        let compiler = OpenClArtifactCompiler::new(context, device, properties, options);
         let kernels = OpenClContext::new(compiler, namespace);
         // Intel's driver submits an in-order queue's every command at once: out of order, kept in
         // order by barriers, it batches them.

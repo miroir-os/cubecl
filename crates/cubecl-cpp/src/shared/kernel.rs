@@ -21,8 +21,6 @@ pub struct ComputeKernel {
     pub has_info: bool,
     /// The kernel takes the dynamic metadata, after its buffers.
     pub has_dynamic_meta: bool,
-    /// The kernel multiplies cooperative matrices.
-    pub uses_mma: bool,
 }
 
 impl Display for ComputeKernel {
