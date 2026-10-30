@@ -89,7 +89,8 @@ pub fn array_name(ctx: &Context, ty: &ArrayType) -> String {
     format!("array_{inner}_{}", ty.length)
 }
 
-opencl_ty!(InfoStructType, |_, _| "info_st".into());
+// C names a struct with its keyword.
+opencl_ty!(InfoStructType, |_, _| "struct info_st".into());
 
 /// `OpenCL`'s own vector type for `vector`, where it has one (2, 4, 8 or 16 numbers; no bool, and no 3: `OpenCL` pads it
 /// to 4); otherwise the shared struct.

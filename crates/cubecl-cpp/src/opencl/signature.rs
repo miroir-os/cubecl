@@ -24,8 +24,8 @@ use pliron::{
 use crate::{
     opencl::{opencl_op, opencl_op_with_out, ty::array_name},
     shared::{
-        CompilationOptions, CompilationState, CppValue, OpExtCPP,
-        signature::{DeclareInfoTypeOp, DeclareVectorOp, IncludeOp},
+        CompilationOptions, CppValue, OpExtCPP,
+        signature::{DeclareVectorOp, IncludeOp},
         ty::TypeExtCPP,
         type_definitions,
     },
@@ -247,14 +247,6 @@ opencl_op_with_out!(SliceSharedOp, |op, ctx| {
     let block = op.block(ctx).name(ctx);
     let offset = op.offset(ctx).0;
     format!("({ptr_ty})(&{block}[{offset}])")
-});
-
-opencl_op!(DeclareInfoTypeOp, |_, ctx| {
-    let state = ctx.aux_ty::<CompilationState>();
-    let mut out = String::new();
-    crate::shared::type_info_definition_sized(&mut out, ctx, &state.info).unwrap();
-    // C names the type `struct info_st`; the kernels use the C++ name.
-    out + "typedef struct info_st info_st;\n"
 });
 
 opencl_op!(DeclareVectorOp, |op, ctx| {
