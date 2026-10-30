@@ -7,7 +7,7 @@ use super::graph::WgpuGraph;
 use super::storage::{WgpuResource, WgpuStorage};
 use crate::WgpuCompiler;
 use crate::compute::artifact::WgpuArtifactCompiler;
-use crate::compute::pipelines::{MetadataLayout, WgpuPipelines};
+use crate::compute::pipelines::{BindingLayout, WgpuPipelines};
 use crate::schedule::{BindingsResource, ScheduleTask, ScheduledWgpuBackend};
 use alloc::sync::Arc;
 use cubecl_common::pool::LeasePool;
@@ -429,7 +429,7 @@ impl<C: WgpuCompiler> Server for WgpuServer<C> {
         // A discarded launch stages none either way. It was never going to write, so a
         // failure in it leaves nothing stale, and tainting its buffers would
         // fail unrelated reads of memory the run deliberately left alone.
-        let layout = MetadataLayout::from(&args.info);
+        let layout = BindingLayout::from(&args);
         if launch_mode == LaunchMode::Queue {
             self.pipelines.enqueue(kernel, layout);
             return;

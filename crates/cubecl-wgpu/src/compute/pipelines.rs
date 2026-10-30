@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 
 use crate::{WgpuCompiledKernel, WgpuCompiler};
-use cubecl_core::server::MetadataBindingInfo;
+use cubecl_core::server::{KernelArguments, MetadataBindingInfo};
 #[cfg(feature = "spirv")]
 use cubecl_environment::persistence::Store;
 use cubecl_server::compiler::{ArtifactId, CompilationError, CompilationTarget};
@@ -37,6 +37,25 @@ impl From<&MetadataBindingInfo> for MetadataLayout {
             Self::Static
         } else {
             Self::Dynamic
+        }
+    }
+}
+
+/// The bindings a launch makes, the part of it beyond its kernel that a
+/// pipeline is built for: its buffers in order, then `info`. A kernel's
+/// representation says what each buffer is; a precompiled one has none, so
+/// its pipeline is laid out from the count alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BindingLayout {
+    pub buffers: usize,
+    pub metadata: MetadataLayout,
+}
+
+impl From<&KernelArguments> for BindingLayout {
+    fn from(args: &KernelArguments) -> Self {
+        Self {
+            buffers: args.resources.len(),
+            metadata: MetadataLayout::from(&args.info),
         }
     }
 }
@@ -95,7 +114,7 @@ impl<C: WgpuCompiler> CompilationTarget for WgpuPipelines<C> {
     }
 
     #[allow(unused_variables)]
-    fn stored(&mut self, id: &ArtifactId<MetadataLayout>) -> Option<WgpuArtifact> {
+    fn stored(&mut self, id: &ArtifactId<BindingLayout>) -> Option<WgpuArtifact> {
         #[cfg(not(feature = "spirv"))]
         return None;
 
@@ -131,7 +150,7 @@ impl<C: WgpuCompiler> CompilationTarget for WgpuPipelines<C> {
     /// store, the one built now.
     fn load(
         &mut self,
-        id: &ArtifactId<MetadataLayout>,
+        id: &ArtifactId<BindingLayout>,
         artifact: &WgpuArtifact,
     ) -> Result<WgpuCompiledKernel, CompilationError> {
         match &artifact.pipeline {
@@ -144,7 +163,7 @@ impl<C: WgpuCompiler> CompilationTarget for WgpuPipelines<C> {
     #[allow(unused_variables)]
     fn store(
         &mut self,
-        id: &ArtifactId<MetadataLayout>,
+        id: &ArtifactId<BindingLayout>,
         artifact: WgpuArtifact,
         _source: Option<&str>,
     ) -> bool {

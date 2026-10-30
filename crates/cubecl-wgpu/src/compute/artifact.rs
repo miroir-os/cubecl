@@ -27,7 +27,7 @@ use cubecl_server::kernel::{BufferIOAttr, CompiledKernel, CubeKernel, DebugInfor
 use cubecl_server::logging::ServerLogger;
 use cubecl_server::validation::{validate_cube_dim, validate_units};
 
-use super::pipelines::MetadataLayout;
+use super::pipelines::BindingLayout;
 
 /// Compiles kernels for one wgpu device with `C`, the shader language that
 /// device was set up for, and has the device build their pipelines.
@@ -78,14 +78,14 @@ pub struct WgpuArtifact {
 }
 
 impl<C: WgpuCompiler> ArtifactCompiler for WgpuArtifactCompiler<C> {
-    type Variant = MetadataLayout;
+    type Variant = BindingLayout;
     type Lowered = CompiledKernel<C>;
     type Artifact = WgpuArtifact;
 
     fn lower(
         &self,
         kernel: &dyn CubeKernel,
-        id: &ArtifactId<MetadataLayout>,
+        id: &ArtifactId<BindingLayout>,
         recording: &mut CompilationRecording,
         logger: &ServerLogger,
     ) -> Result<Self::Lowered, LaunchError> {
@@ -114,7 +114,7 @@ impl<C: WgpuCompiler> ArtifactCompiler for WgpuArtifactCompiler<C> {
     /// there, which is most of what a wgpu kernel costs.
     fn finalize(
         &self,
-        id: &ArtifactId<MetadataLayout>,
+        id: &ArtifactId<BindingLayout>,
         mut lowered: Self::Lowered,
     ) -> Result<WgpuArtifact, LaunchError> {
         let compiler = C::init(self.backend, &self.options);
@@ -142,7 +142,7 @@ impl<C> WgpuArtifactCompiler<C> {
     /// `id`'s metadata.
     pub fn build(
         &self,
-        id: &ArtifactId<MetadataLayout>,
+        id: &ArtifactId<BindingLayout>,
         artifact: &WgpuArtifact,
     ) -> Result<WgpuCompiledKernel, CompilationError> {
         let repr = artifact.repr.as_ref().map(|repr| repr.as_ref());
@@ -152,7 +152,13 @@ impl<C> WgpuArtifactCompiler<C> {
             ModuleSource::resolve(repr, artifact.lang, &artifact.source)?,
             id.kernel.mode,
         )?;
-        let pipeline = self.create_pipeline(&artifact.entrypoint_name, repr, module, id.variant)?;
+        let pipeline = self.create_pipeline(
+            &artifact.entrypoint_name,
+            repr,
+            artifact.lang,
+            module,
+            id.variant,
+        )?;
         Ok(WgpuCompiledKernel {
             pipeline,
             compiler_info: artifact.compiler_info,
@@ -272,15 +278,20 @@ impl<C> WgpuArtifactCompiler<C> {
         &self,
         entrypoint_name: &str,
         repr: Option<AutoRepresentationRef<'_>>,
+        lang: &str,
         module: ShaderModule,
-        metadata: MetadataLayout,
+        layout: BindingLayout,
     ) -> Result<Arc<ComputePipeline>, CompilationError> {
         let bindings_info = match repr {
-            Some(AutoRepresentationRef::Wgsl(repr)) => Some(wgsl::bindings(repr, metadata)),
+            Some(AutoRepresentationRef::Wgsl(repr)) => Some(wgsl::bindings(repr, layout.metadata)),
             #[cfg(all(feature = "msl", target_os = "macos"))]
-            Some(AutoRepresentationRef::Msl(repr)) => Some(metal::bindings(repr, metadata)),
+            Some(AutoRepresentationRef::Msl(repr)) => Some(metal::bindings(repr, layout.metadata)),
             #[cfg(feature = "spirv")]
             Some(AutoRepresentationRef::SpirV(repr)) => Some(vulkan::bindings(repr)),
+            // Precompiled MSL, which the device cannot reflect a layout from
+            // (naga reflects precompiled WGSL's).
+            #[cfg(all(feature = "msl", target_os = "macos"))]
+            None if lang == "msl" => Some(metal::precompiled_bindings(layout)),
             _ => None,
         };
 

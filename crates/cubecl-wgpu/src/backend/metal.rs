@@ -1,4 +1,4 @@
-use crate::compute::pipelines::MetadataLayout;
+use crate::compute::pipelines::{BindingLayout, MetadataLayout};
 use cubecl_core::{
     WgpuCompilationOptions,
     ir::{AddressType, UIntKind},
@@ -30,12 +30,22 @@ pub fn bindings(repr: &MslComputeKernel, metadata: MetadataLayout) -> (Vec<Visib
             Visibility::ReadWrite
         }
     });
-    let info_vis = match metadata {
+    (buffers.chain(info(metadata)).collect(), 0)
+}
+
+/// A precompiled kernel's bindings: the launch's buffers, each read-write,
+/// then `info`.
+pub fn precompiled_bindings(layout: BindingLayout) -> (Vec<Visibility>, usize) {
+    let buffers = core::iter::repeat_n(Visibility::ReadWrite, layout.buffers);
+    (buffers.chain(info(layout.metadata)).collect(), 0)
+}
+
+fn info(metadata: MetadataLayout) -> Option<Visibility> {
+    match metadata {
         MetadataLayout::Absent => None,
         MetadataLayout::Static => Some(Visibility::Uniform),
         MetadataLayout::Dynamic => Some(Visibility::Read),
-    };
-    (buffers.chain(info_vis).collect(), 0)
+    }
 }
 
 /// Request a native Metal device, panicking if device creation fails.
