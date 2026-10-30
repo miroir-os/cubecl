@@ -116,8 +116,12 @@ impl CppConstantAttr for ZeroAttr {
     fn as_f64(&self, _ctx: &Context) -> f64 {
         0.0
     }
-    fn to_cpp(&self, _ctx: &Context) -> String {
-        "{}".to_string()
+    fn to_cpp(&self, ctx: &Context) -> String {
+        // C has no empty initialiser for a scalar.
+        match ctx.target() {
+            Target::OpenCl => "{0}".to_string(),
+            _ => "{}".to_string(),
+        }
     }
 }
 
@@ -140,6 +144,9 @@ pub(crate) fn format_const(ctx: &Context, value: &AttrObj, ty: TypeHandle) -> St
             "(1.0f/0.0f)".into()
         } else if val.is_infinite() {
             "(-1.0f/0.0f)".into()
+        } else if val == 0.0 && val.is_sign_negative() {
+            // Zero prints as the integer `-0`, which is `+0.0` once converted.
+            "(-0.0f)".into()
         } else {
             attr.to_cpp(ctx)
         };
@@ -178,5 +185,11 @@ mod tests {
             "bfloat((0.0f/0.0f));\n"
         );
         assert_eq!(metal_constant(0.5, FloatKind::F16), "0.5;\n");
+    }
+
+    #[test]
+    fn negative_zero_keeps_its_sign() {
+        assert_eq!(metal_constant(-0.0, FloatKind::F32), "(-0.0f);\n");
+        assert_eq!(metal_constant(0.0, FloatKind::F32), "0;\n");
     }
 }

@@ -24,11 +24,13 @@ use cubecl_core::{
     codegen::KernelDump,
     ir::{
         AddressType, ContextExt, DeviceProperties, ElemType, FloatKind, IntKind, Type, UIntKind,
+        dialect::matrix::MultiplyAccumulateOp,
         features::{AtomicUsage, EnumSet, TypeUsage},
         interfaces::TypedExt,
         metadata::Info,
         rewrite::{
-            CanonicalizePass, InheritLocationPass, LowerOpsPass, SimplifyOpsPass, visit_all_values,
+            CanonicalizePass, InheritLocationPass, LowerOpsPass, SimplifyOpsPass,
+            visit_all_ops_of_type, visit_all_values,
         },
         settings::{DebugInfo, Dim3},
         types::scalar::{Complex32Type, Complex64Type},
@@ -89,6 +91,20 @@ pub struct CompilationOptions {
     pub supports_features: CppSupportedFeatures,
     /// AMD only, and `None` on hardware without WMMA.
     pub amd_wmma: Option<AmdWmma>,
+    /// `OpenCL` only.
+    pub opencl: OpenClOptions,
+}
+
+/// What an `OpenCL` device adds to `OpenCL` C 3.0.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenClOptions {
+    /// Compile every kernel that uses planes (subgroups) or cooperative matrices for this subgroup
+    /// size (`cl_intel_required_subgroup_size`); `None` leaves the size to the driver, and
+    /// `PLANE_DIM` is then whatever it chose.
+    pub subgroup_size: Option<u32>,
+    /// Cooperative matrices on Intel's DPAS (`cl_intel_subgroup_matrix_multiply_accumulate`):
+    /// 8-row tiles as wide as the subgroup (`subgroup_size`, 8 or 16).
+    pub dpas: bool,
 }
 
 pub struct CompilationState {
@@ -116,6 +132,7 @@ impl Default for CompilationOptions {
             warp_size: 32,
             supports_features: Default::default(),
             amd_wmma: None,
+            opencl: Default::default(),
         }
     }
 }
@@ -168,6 +185,7 @@ where
             Target::Cuda => "cuda",
             Target::Hip => "hip",
             Target::Metal => "msl",
+            Target::OpenCl => "opencl",
         }
     }
 }
@@ -257,7 +275,7 @@ where
         // CUDA converts fp8 with cuda_fp8.h, which carries its own software path below sm_89.
         let native_fp8 = match T::target() {
             Target::Cuda => EnumSet::all(),
-            Target::Hip | Target::Metal => EnumSet::empty(),
+            Target::Hip | Target::Metal | Target::OpenCl => EnumSet::empty(),
         };
         func_passes.add_pass(LowerMinifloatCastPass::new(LowerMinifloatCast::new(
             native_fp8,
@@ -335,6 +353,17 @@ where
         let shared_memory_size = shared_memory_size(&ctx, module_op);
         let buffers = buffers(&ctx, entry_func);
         let io = buffer_io(&ctx, entry_func);
+        let (has_info, has_dynamic_meta) = {
+            let info = &ctx.aux_ty::<CompilationState>().info;
+            (info.has_info(), info.has_dynamic_meta)
+        };
+        let mut uses_mma = false;
+        visit_all_ops_of_type::<MultiplyAccumulateOp, _>(
+            &ctx,
+            &mut uses_mma,
+            module_op,
+            |_, uses, _| *uses = true,
+        );
 
         // Emit here rather than lazily from `Display`, so an op that survives lowering with no
         // `OpToCPP` impl fails the compilation instead of panicking on the compiler thread.
@@ -366,6 +395,9 @@ where
             buffers,
             io,
             source,
+            has_info,
+            has_dynamic_meta,
+            uses_mma,
         };
 
         dump.write("module.cpp", || {
