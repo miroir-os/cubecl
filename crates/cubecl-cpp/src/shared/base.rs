@@ -24,13 +24,11 @@ use cubecl_core::{
     codegen::KernelDump,
     ir::{
         AddressType, ContextExt, DeviceProperties, ElemType, FloatKind, IntKind, Type, UIntKind,
-        dialect::matrix::MultiplyAccumulateOp,
         features::{AtomicUsage, EnumSet, TypeUsage},
         interfaces::TypedExt,
         metadata::Info,
         rewrite::{
-            CanonicalizePass, InheritLocationPass, LowerOpsPass, SimplifyOpsPass,
-            visit_all_ops_of_type, visit_all_values,
+            CanonicalizePass, InheritLocationPass, LowerOpsPass, SimplifyOpsPass, visit_all_values,
         },
         settings::{DebugInfo, Dim3},
         types::scalar::{Complex32Type, Complex64Type},
@@ -357,13 +355,6 @@ where
             let info = &ctx.aux_ty::<CompilationState>().info;
             (info.has_info(), info.has_dynamic_meta)
         };
-        let mut uses_mma = false;
-        visit_all_ops_of_type::<MultiplyAccumulateOp, _>(
-            &ctx,
-            &mut uses_mma,
-            module_op,
-            |_, uses, _| *uses = true,
-        );
 
         // Emit here rather than lazily from `Display`, so an op that survives lowering with no
         // `OpToCPP` impl fails the compilation instead of panicking on the compiler thread.
@@ -397,7 +388,6 @@ where
             source,
             has_info,
             has_dynamic_meta,
-            uses_mma,
         };
 
         dump.write("module.cpp", || {

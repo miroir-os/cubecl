@@ -104,7 +104,7 @@ impl Info {
 }
 
 /// A scalar of up to 8 bytes the driver returned, little-endian.
-pub(crate) fn word(bytes: &[u8]) -> u64 {
+fn word(bytes: &[u8]) -> u64 {
     let mut word = [0u8; 8];
     let n = bytes.len().min(8);
     word[..n].copy_from_slice(&bytes[..n]);
