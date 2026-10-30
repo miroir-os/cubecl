@@ -309,4 +309,12 @@ impl Runtime for OpenClRuntime {
             .map(|index| OpenClDevice { index }.to_id())
             .collect()
     }
+
+    /// A GPU: a machine whose only `OpenCL` device is a CPU implementation (`PoCL`) leaves the
+    /// default to a native CPU runtime.
+    fn is_available() -> bool {
+        device::devices()
+            .first()
+            .is_some_and(|&device| device::Info(device).is_gpu())
+    }
 }
