@@ -1442,6 +1442,7 @@ dependencies = [
  "opencl-sys",
  "paste",
  "serde",
+ "serde_bytes",
  "test-log",
 ]
 

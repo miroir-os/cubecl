@@ -3,6 +3,7 @@
 
 use crate::OpenClCompiler;
 use crate::compute::cl;
+use cl3::info_type::InfoType;
 use cubecl_core::server::LaunchError;
 use cubecl_core::{ir::DeviceProperties, prelude::*};
 use cubecl_environment::backtrace::BackTrace;
@@ -13,8 +14,9 @@ use cubecl_server::kernel::{BufferIOAttr, CompiledKernel, CubeKernel, DebugInfor
 use cubecl_server::logging::ServerLogger;
 use cubecl_server::validation::{validate_cube_dim, validate_shared_memory, validate_units};
 use opencl_sys::{
-    CL_KERNEL_SPILL_MEM_SIZE_INTEL, CL_KERNEL_WORK_GROUP_SIZE, CL_PROGRAM_BUILD_LOG, cl_context,
-    cl_device_id, cl_kernel, cl_kernel_work_group_info,
+    CL_KERNEL_PROGRAM, CL_KERNEL_SPILL_MEM_SIZE_INTEL, CL_KERNEL_WORK_GROUP_SIZE,
+    CL_PROGRAM_BINARIES, CL_PROGRAM_BUILD_LOG, cl_context, cl_device_id, cl_kernel,
+    cl_kernel_work_group_info, cl_program,
 };
 use std::ffi::CString;
 use std::sync::Arc;
@@ -63,13 +65,17 @@ pub(crate) struct OpenClKernel {
     pub has_info: bool,
 }
 
-/// `OpenCL` C ready for the driver to build, with what launching it needs: what the compilation
-/// store keeps for a kernel.
+/// `OpenCL` C and the program the driver built from it, with what launching it needs: what the
+/// compilation store keeps for a kernel.
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Clone)]
 pub(crate) struct OpenClCacheEntry {
     entrypoint_name: String,
     cube_dim: (u32, u32, u32),
     source: String,
+    /// The device binary of the program built from `source` (empty where the driver gives none):
+    /// loading it takes the driver milliseconds, building `source` again up to a second.
+    #[serde(with = "serde_bytes")]
+    binary: Vec<u8>,
     io: Option<Vec<BufferIOAttr>>,
     has_dynamic_meta: bool,
     has_info: bool,
@@ -136,16 +142,21 @@ impl OpenClArtifactCompiler {
         }
     }
 
-    /// Has the driver build `entry`'s program and kernel.
+    /// Has the driver load `entry`'s program from its binary, or build it from its source where
+    /// there is no binary or the driver refuses it, and takes its kernel.
     pub(crate) fn load(&self, entry: &OpenClCacheEntry) -> Result<OpenClKernel, CompilationError> {
         let cube_dim = entry.cube_dim.into();
-        Ok(OpenClKernel {
-            kernel: self.build(
+        let kernel = match self.load_binary(&entry.binary, &entry.entrypoint_name) {
+            Some(kernel) => Arc::new(kernel),
+            None => self.build(
                 &entry.source,
                 &entry.entrypoint_name,
                 cube_dim,
                 entry.uses_mma,
             )?,
+        };
+        Ok(OpenClKernel {
+            kernel,
             cube_dim,
             io: entry.io.clone().map(Arc::from),
             has_dynamic_meta: entry.has_dynamic_meta,
@@ -209,16 +220,18 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
         let (has_dynamic_meta, has_info, uses_mma) =
             (repr.has_dynamic_meta, repr.has_info, repr.uses_mma);
         let cube_dim = lowered.cube_dim;
-        let entry = OpenClCacheEntry {
+        let mut entry = OpenClCacheEntry {
             io: lowered.io.take(),
             entrypoint_name: lowered.entrypoint_name,
             cube_dim: (cube_dim.x, cube_dim.y, cube_dim.z),
             source: lowered.source,
+            binary: Vec::new(),
             has_dynamic_meta,
             has_info,
             uses_mma,
         };
         let kernel = self.load(&entry)?;
+        entry.binary = binary(&kernel.kernel).unwrap_or_default();
         Ok(OpenClArtifact {
             entry,
             kernel: Some(kernel),
@@ -261,6 +274,27 @@ impl OpenClArtifactCompiler {
         let options = self.large_registers.as_ref().filter(|_| spill > limit)?;
         let wide = self.build_with(source, entrypoint_name, options).ok()?;
         (self.spill_bytes(&wide) < spill && self.max_units(&wide) >= units).then_some(wide)
+    }
+
+    /// The kernel `entrypoint_name` of the program the driver loads from `binary`, if it takes it.
+    fn load_binary(&self, binary: &[u8], entrypoint_name: &str) -> Option<KernelHandle> {
+        if binary.is_empty() {
+            return None;
+        }
+        // SAFETY: one binary, for the one device.
+        let program = unsafe {
+            cl3::program::create_program_with_binary(self.context, &[self.device], &[binary])
+        }
+        .ok()?;
+        let kernel =
+            cl3::program::build_program(program, &[self.device], c"", None, std::ptr::null_mut())
+                .ok()
+                .and_then(|()| CString::new(entrypoint_name).ok())
+                .and_then(|name| cl3::kernel::create_kernel(program, &name).ok())
+                .map(KernelHandle);
+        // The kernel holds its own reference to the program.
+        cl::api().clReleaseProgram(program);
+        kernel
     }
 
     fn work_group_info(
@@ -336,5 +370,17 @@ impl OpenClArtifactCompiler {
         // The kernel holds its own reference to the program.
         crate::compute::cl::api().clReleaseProgram(program);
         result
+    }
+}
+
+/// The device binary of the program `kernel` was taken from.
+fn binary(kernel: &KernelHandle) -> Option<Vec<u8>> {
+    let InfoType::Ptr(program) = cl3::kernel::get_kernel_info(kernel.0, CL_KERNEL_PROGRAM).ok()?
+    else {
+        return None;
+    };
+    match cl3::program::get_program_info(program as cl_program, CL_PROGRAM_BINARIES).ok()? {
+        InfoType::VecVecUchar(mut binaries) => binaries.pop().filter(|binary| !binary.is_empty()),
+        _ => None,
     }
 }
