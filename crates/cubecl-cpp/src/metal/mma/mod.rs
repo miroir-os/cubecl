@@ -69,9 +69,10 @@ metal_op!(StoreOp, |op, ctx| {
     let mat = op.matrix(ctx).name(ctx);
     let destination = as_scalar_ptr(ctx, op.destination(ctx));
     let stride = op.stride(ctx).name(ctx);
+    let transpose = matches!(op.layout(ctx).0, MatrixLayout::ColMajor);
     format!(
         "
-simdgroup_store(*{mat}, {destination}, {stride});
+simdgroup_store(*{mat}, {destination}, {stride}, 0, {transpose});
 simdgroup_barrier(mem_flags::mem_threadgroup);"
     )
 });
