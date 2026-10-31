@@ -1,10 +1,4 @@
-use cubecl_core::ir::dialect::{
-    general::PrintfOp,
-    synchronization::{SyncOp, SyncScope},
-};
-use itertools::Itertools;
-
-use crate::shared::CppValue;
+use cubecl_core::ir::dialect::synchronization::{SyncOp, SyncScope};
 
 macro_rules! opencl_op {
     ($ty: ty, $impl: expr) => {
@@ -44,13 +38,6 @@ macro_rules! call {
     };
 }
 pub(super) use call;
-
-opencl_op!(PrintfOp, |op, ctx| {
-    let format_string = String::from(op.format_string(ctx).clone());
-    let args = op.args(ctx);
-    let args = args.iter().map(|it| format!(", {}", it.name(ctx))).join("");
-    format!("printf({format_string:?}{args});\n")
-});
 
 // Plane and cube syncs order shared memory, as on Metal and WGSL; the device sync (`sync_storage`)
 // orders global memory too, with device-scope fences where the device has them (`sync_device` in

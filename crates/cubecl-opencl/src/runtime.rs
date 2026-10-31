@@ -1,5 +1,5 @@
 use crate::compute::artifact::OpenClArtifactCompiler;
-use crate::compute::context::OpenClContext;
+use crate::compute::programs::OpenClPrograms;
 use crate::compute::server::OpenClServer;
 use crate::compute::stream::OpenClStreamBackend;
 use crate::device::{self, OpenClDevice};
@@ -18,6 +18,7 @@ use cubecl_core::{
 };
 use cubecl_cpp::shared::{CompilationOptions, OpenClOptions, register_wmma_features};
 use cubecl_server::allocator::ContiguousMemoryLayoutPolicy;
+use cubecl_server::compiler::KernelLoader;
 use cubecl_server::runtime::Runtime;
 use opencl_sys::*;
 
@@ -117,7 +118,7 @@ impl DeviceService for OpenClServer {
         let namespace = format!("{platform}/{name}/{driver}/plane{plane:?}/dpas{dpas}");
         let properties = (*utilities.properties).clone();
         let compiler = OpenClArtifactCompiler::new(context, device, properties, options);
-        let kernels = OpenClContext::new(compiler, namespace);
+        let kernels = KernelLoader::new(OpenClPrograms::new(compiler, namespace));
         // Intel's driver submits an in-order queue's every command at once: out of order, kept in
         // order by barriers, it batches them.
         let out_of_order = intel

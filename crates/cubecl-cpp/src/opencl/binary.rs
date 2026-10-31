@@ -3,7 +3,7 @@ use cubecl_core::{
     ir::{
         dialect::{
             cmp::{FClampOp, FMaxOp, FMinOp, SClampOp, UClampOp},
-            math::{FmaOp, PowiOp, RhypotOp, SMulHiOp, UMulHiOp},
+            math::{PowiOp, RhypotOp, SMulHiOp, UMulHiOp},
             memory::IndexOp,
         },
         interfaces::TypedExt,
@@ -74,4 +74,3 @@ opencl_op_with_out!(IndexOp, |op, ctx| {
 });
 
 // Generic over half and float (the shared emission names CUDA's half intrinsics).
-call!(FmaOp, "fma", a, b, c);
