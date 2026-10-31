@@ -54,7 +54,6 @@ fn lanes(ctx: &Context) -> usize {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Elem {
     F16,
-    Bf16,
     F32,
     I8,
     U8,
@@ -65,8 +64,6 @@ fn elem(ctx: &Context, ty: &MatrixType) -> Elem {
     let elem = ty.elem_ty;
     if elem.is_float16(ctx) {
         Elem::F16
-    } else if elem.is_bfloat16(ctx) {
-        Elem::Bf16
     } else if elem.is_float32(ctx) {
         Elem::F32
     } else if elem.size(ctx) == 1 {
@@ -126,7 +123,7 @@ opencl_ty!(MatrixType, |ty, ctx| {
     // Every fragment is declared with its type: the one place to refuse what DPAS lacks.
     let supported = match ty.ident {
         MatrixIdent::Accumulator => matches!(elem(ctx, ty), Elem::F32 | Elem::F16 | Elem::I32),
-        _ => matches!(elem(ctx, ty), Elem::F16 | Elem::Bf16 | Elem::I8 | Elem::U8),
+        _ => matches!(elem(ctx, ty), Elem::F16 | Elem::I8 | Elem::U8),
     };
     if !supported {
         let what = format!("{:?} fragment of {}", ty.ident, ty.elem_ty.to_cpp(ctx));
@@ -155,12 +152,12 @@ opencl_op!(FillOp, |op, ctx| {
     let fill = match (ty.ident, elem(ctx, &ty), lanes(ctx)) {
         (MatrixIdent::Accumulator, Elem::I32, _) => format!("(int8)({value})"),
         (MatrixIdent::Accumulator, _, _) => format!("(float8)((float)({value}))"),
-        (MatrixIdent::A, Elem::F16 | Elem::Bf16, 16) => format!("(short8)(as_short({value}))"),
+        (MatrixIdent::A, Elem::F16, 16) => format!("(short8)(as_short({value}))"),
         (MatrixIdent::A, Elem::I8 | Elem::U8, 16) => {
             let scalar = fragment_scalar(ctx, &ty);
             format!("({frag})(as_{scalar}((char2)({value}, {value})))")
         }
-        (_, Elem::F16 | Elem::Bf16, _) => format!("(int8)(as_int((half2)({value}, {value})))"),
+        (_, Elem::F16, _) => format!("(int8)(as_int((half2)({value}, {value})))"),
         (_, Elem::I8 | Elem::U8, _) => {
             let scalar = fragment_scalar(ctx, &ty);
             format!("({frag})(as_{scalar}((char4)({value}, {value}, {value}, {value})))")
@@ -231,7 +228,7 @@ opencl_op!(LoadOp, |op, ctx| {
     let ty = matrix_ty(ctx, op.matrix(ctx));
     let kind = elem(ctx, &ty);
     let scalar = match kind {
-        Elem::F16 | Elem::Bf16 => "ushort",
+        Elem::F16 => "ushort",
         Elem::F32 => "float",
         Elem::I8 | Elem::U8 => "uchar",
         Elem::I32 => "int",
@@ -285,12 +282,12 @@ fn load_a(ctx: &Context, ty: &MatrixType, kind: Elem, source: &Source) -> String
             .join(" ")
     };
     match (kind, wide) {
-        (Elem::F16 | Elem::Bf16, true) => format!(
+        (Elem::F16, true) => format!(
             "({{ {} (int8)({}); }})",
             columns(2, "ushort8"),
             components(|m| format!("as_int((ushort2)(c0.s{m}, c1.s{m}))"))
         ),
-        (Elem::F16 | Elem::Bf16, false) => format!("as_short8(vload8(0, {p} + {LANE} * {stride}))"),
+        (Elem::F16, false) => format!("as_short8(vload8(0, {p} + {LANE} * {stride}))"),
         (_, true) => format!(
             "({{ {} ({frag})({}); }})",
             columns(4, "uchar8"),
@@ -316,7 +313,7 @@ fn load_b(ctx: &Context, ty: &MatrixType, kind: Elem, source: &Source) -> String
     }
     // Row-major: one block read per K row, packed in pairs (16-bit) or fours (8-bit).
     let (read, per_int) = match kind {
-        Elem::F16 | Elem::Bf16 => ("ushort", 2),
+        Elem::F16 => ("ushort", 2),
         _ => ("uchar", 4),
     };
     let rows = (0..8 * per_int)
@@ -458,9 +455,8 @@ opencl_op!(MultiplyAccumulateOp, |op, ctx| {
     let a_ty = matrix_ty(ctx, op.mat_a(ctx));
     let b_ty = matrix_ty(ctx, op.mat_b(ctx));
     let d_ty = matrix_ty(ctx, op.mat_d(ctx));
-    // Inputs are f16, bf16, i8 or u8 (checked where they are declared).
+    // Inputs are f16, i8 or u8 (checked where they are declared).
     let name = |e: Elem| match e {
-        Elem::Bf16 => "bf16",
         Elem::I8 => "i8",
         Elem::U8 => "u8",
         _ => "f16",

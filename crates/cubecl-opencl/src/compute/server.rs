@@ -1,6 +1,6 @@
 use crate::compute::artifact::OpenClKernel as CompiledKernel;
 use crate::compute::cl::{self, ClError, Event};
-use crate::compute::context::OpenClContext;
+use crate::compute::programs::OpenClPrograms;
 use crate::compute::stream::{OpenClStream, OpenClStreamBackend};
 use crate::memory::{OpenClResource, OpenClStorage};
 use cubecl_common::bytes::Bytes;
@@ -17,7 +17,8 @@ use cubecl_core::{
 use cubecl_environment::backtrace::BackTrace;
 use cubecl_environment::future::DynFut;
 use cubecl_environment::stream::StreamId;
-use cubecl_server::compiler::ArtifactId;
+use cubecl_server::command::CopyLayout;
+use cubecl_server::compiler::{ArtifactId, KernelLoader};
 use cubecl_server::memory_management::{Cleanup, PageUpdate};
 use cubecl_server::{
     execution::LaunchMode,
@@ -46,7 +47,8 @@ use std::time::{Duration, Instant};
 /// `OpenCL` compute server.
 #[derive(Debug)]
 pub struct OpenClServer {
-    context: OpenClContext,
+    /// Compiles `CubeCL` IR to `OpenCL` C and on to kernels built for the device, caching both.
+    kernels: KernelLoader<OpenClPrograms>,
     streams: MultiStream<OpenClStreamBackend>,
     pub(crate) utilities: Arc<ServerUtilities>,
     timestamps: TimestampProfiler,
@@ -72,7 +74,7 @@ impl OpenClServer {
     /// A server on `cl_context`, whose reference it takes over.
     pub(crate) fn new(
         cl_context: cl_context,
-        context: OpenClContext,
+        kernels: KernelLoader<OpenClPrograms>,
         backend: OpenClStreamBackend,
         utilities: Arc<ServerUtilities>,
     ) -> Self {
@@ -84,7 +86,7 @@ impl OpenClServer {
                 .max_streams
         };
         Self {
-            context,
+            kernels,
             streams: MultiStream::new(logger, backend, max_streams),
             utilities,
             timestamps: TimestampProfiler::default(),
@@ -185,44 +187,29 @@ fn resolve_origin_resource(
     resolved: &mut ResolvedStreams<'_, OpenClStreamBackend>,
     binding: &BufferBinding,
 ) -> Result<OpenClResource, IoError> {
-    let stream = resolved.get(&binding.stream);
-    let mut storage_handle = stream
+    resolved
+        .get(&binding.stream)
         .memory_management
-        .get_storage(binding.memory.clone())?;
-    if let Some(offset) = binding.offset_start {
-        storage_handle = storage_handle.offset_start(offset);
-    }
-    if let Some(offset) = binding.offset_end {
-        storage_handle = storage_handle.offset_end(offset);
-    }
-    stream.memory_management.storage().get(&storage_handle)
+        .get_resource(
+            binding.memory.clone(),
+            binding.offset_start,
+            binding.offset_end,
+        )
 }
 
 /// The contiguous runs of a pitched row-major tensor in its binding: (byte offset, bytes) of each,
 /// checked to lie in the binding's `size` bytes.
 fn runs(descriptor: &CopyDescriptor, size: u64) -> Result<Vec<(usize, usize)>, IoError> {
-    let (shape, strides, elem_size) =
-        (&descriptor.shape, &descriptor.strides, descriptor.elem_size);
-    let total = shape.iter().product::<usize>() * elem_size;
+    let total = descriptor.shape.iter().product::<usize>() * descriptor.elem_size;
     if total == 0 {
         return Ok(Vec::new());
     }
-    if shape.len() != strides.len()
-        || !cubecl_core::zspace::striding::has_pitched_row_major_strides(shape, strides)
-    {
-        return Err(IoError::UnsupportedStrides {
-            backtrace: BackTrace::capture(),
-        });
-    }
-    // Rows of `width` bytes, `pitch` apart: a packed tensor is one row.
-    let width = shape.last().map_or(total, |&n| n * elem_size);
-    let pitch = strides
-        .len()
-        .checked_sub(2)
-        .map_or(width, |i| strides[i] * elem_size);
-    let runs: Vec<_> = match pitch == width {
-        true => vec![(0, total)],
-        false => (0..total / width).map(|row| (row * pitch, width)).collect(),
+    let layout = CopyLayout::of(&descriptor.shape, &descriptor.strides, descriptor.elem_size)?;
+    let runs: Vec<_> = match layout.pitch {
+        None => vec![(0, total)],
+        Some(pitch) => (0..pitch.height)
+            .map(|row| (row * pitch.stride_bytes, pitch.width_bytes))
+            .collect(),
     };
     let end = runs.last().map_or(0, |(offset, len)| offset + len) as u64;
     if end > size {
@@ -487,14 +474,14 @@ impl Server for OpenClServer {
         launch_mode: LaunchMode,
     ) {
         if launch_mode == LaunchMode::Queue {
-            self.context.queue(kernel);
+            self.kernels.enqueue(kernel, ());
             return;
         }
         let id = ArtifactId {
             kernel: kernel.id(),
             variant: (),
         };
-        let compiled = self.context.load(&*kernel, &id, &self.utilities.logger);
+        let compiled = self.kernels.load(&*kernel, &id, &self.utilities.logger);
         let compiled = match compiled {
             Ok(compiled) => compiled,
             Err(err) => {
@@ -607,7 +594,7 @@ impl Server for OpenClServer {
     }
 
     fn compile_queued(&mut self) {
-        self.context.compile_queued(&self.utilities.logger);
+        self.kernels.compile_queued(&self.utilities.logger);
     }
 
     fn flush(&mut self, stream_id: StreamId) -> Result<(), ServerError> {

@@ -11,7 +11,6 @@ version.workspace = true
 
 [features]
 default = ["std"]
-pliron-dump = ["cubecl-cpp/pliron-dump"]
 persistence = ["cubecl-server/persistence"]
 std = [
     "cubecl-server/std",
