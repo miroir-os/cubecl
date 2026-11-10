@@ -1,6 +1,7 @@
 use crate::shared::ty::TypeExtCPP;
 
 use cubecl_core::ir::metadata::Info;
+use cubecl_core::ir::{EnumSet, FastMath};
 use cubecl_runtime::kernel::{BufferIOAttr, Visibility};
 use pliron::context::Context;
 
@@ -21,6 +22,9 @@ pub struct ComputeKernel {
     pub has_info: bool,
     /// The kernel takes the dynamic metadata, after its buffers.
     pub has_dynamic_meta: bool,
+    /// The fast-math modes the kernel was written for (`fast_math`), for targets that set them per
+    /// program.
+    pub fast_math: EnumSet<FastMath>,
 }
 
 impl Display for ComputeKernel {

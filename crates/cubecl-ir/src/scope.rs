@@ -164,6 +164,10 @@ pub struct GlobalState {
     pub typemap: Types,
     pub sizemap: Sizes,
     pub modes: InstructionModes,
+    /// Every fast-math mode some of the kernel was expanded under (`fast_math` on the kernel or a
+    /// part of it): what a backend that sets fast math per program rather than per instruction
+    /// may assume for the whole kernel.
+    pub kernel_fp_math: EnumSet<FastMath>,
     pub target_properties: TargetProperties,
     pub device_properties: Option<Arc<DeviceProperties>>,
 }
@@ -351,6 +355,7 @@ fn new_context(settings: KernelSettings) -> Rc<UnsafeCell<Context>> {
         typemap: Default::default(),
         sizemap: Default::default(),
         modes: Default::default(),
+        kernel_fp_math: Default::default(),
         target_properties: Default::default(),
         device_properties: Default::default(),
         errors: Default::default(),
@@ -387,6 +392,7 @@ fn dummy_context() -> Rc<UnsafeCell<Context>> {
         typemap: Default::default(),
         sizemap: Default::default(),
         modes: Default::default(),
+        kernel_fp_math: Default::default(),
         target_properties: Default::default(),
         device_properties: Default::default(),
         errors: Default::default(),
