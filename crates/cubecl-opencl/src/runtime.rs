@@ -113,9 +113,9 @@ impl DeviceService for OpenClServer {
             allocator,
         );
         // What the cached sources were generated for: the device and driver report what they may
-        // use, the options shape them.
+        // use, the options shape them; entries hold their kernels' build options (`options`).
         let (platform, driver) = (info.platform(), info.string(CL_DRIVER_VERSION));
-        let namespace = format!("{platform}/{name}/{driver}/plane{plane:?}/dpas{dpas}");
+        let namespace = format!("{platform}/{name}/{driver}/plane{plane:?}/dpas{dpas}/options");
         let properties = (*utilities.properties).clone();
         let compiler = OpenClArtifactCompiler::new(context, device, properties, options);
         let kernels = KernelLoader::new(OpenClPrograms::new(compiler, namespace));
