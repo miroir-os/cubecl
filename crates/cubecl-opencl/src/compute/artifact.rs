@@ -31,7 +31,14 @@ const OPTIONS: &str = "-cl-std=CL3.0";
 /// flag whose relaxations the modes allow (`OpenCL` takes the redundant ones).
 fn relaxed_options(modes: EnumSet<FastMath>) -> String {
     use FastMath::*;
-    let unsafe_math = AllowContraction | AllowReassociation | AllowReciprocal | UnsignedZero;
+    // (`-cl-unsafe-math-optimizations` may assume valid arguments and results and lose precision)
+    let unsafe_math = AllowContraction
+        | AllowReassociation
+        | AllowReciprocal
+        | UnsignedZero
+        | NotNaN
+        | NotInf
+        | ReducedPrecision;
     [
         (EnumSet::only(AllowContraction), "-cl-mad-enable"),
         (EnumSet::only(UnsignedZero), "-cl-no-signed-zeros"),
