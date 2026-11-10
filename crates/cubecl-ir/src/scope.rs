@@ -165,9 +165,9 @@ pub struct GlobalState {
     pub typemap: Types,
     pub sizemap: Sizes,
     pub modes: InstructionModes,
-    /// Every fast-math mode some of the kernel was expanded under (`fast_math` on the kernel or a
-    /// part of it): what a backend that sets fast math per program rather than per instruction
-    /// may assume for the whole kernel.
+    /// The fast-math modes the whole kernel may assume (`fast_math` on the kernel, narrowed by
+    /// every region inside it): what a backend that sets fast math per program rather than per
+    /// instruction may use. Empty for a kernel without `fast_math`.
     pub kernel_fp_math: EnumSet<FastMath>,
     pub target_properties: TargetProperties,
     pub device_properties: Option<Arc<DeviceProperties>>,
