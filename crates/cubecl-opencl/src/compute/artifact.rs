@@ -27,28 +27,23 @@ use std::sync::Arc;
 const OPTIONS: &str = "-cl-std=CL3.0";
 
 /// The `OpenCL` build options for a kernel written for the fast-math modes `modes` (`CubeCL`'s
-/// `fast_math`, which `OpenCL` sets per program): every mode -> `-cl-fast-relaxed-math` (its
-/// native builtins too), else the relaxations `OpenCL` names that the modes allow.
-fn relaxed_options(modes: EnumSet<FastMath>) -> &'static str {
+/// `fast_math`, which `OpenCL` sets per program: a helper inside the kernel is relaxed with it): each
+/// flag whose relaxations the modes allow (`OpenCL` takes the redundant ones).
+fn relaxed_options(modes: EnumSet<FastMath>) -> String {
     use FastMath::*;
     let unsafe_math = AllowContraction | AllowReassociation | AllowReciprocal | UnsignedZero;
-    if modes == FastMath::all() {
-        "-cl-fast-relaxed-math"
-    } else if modes.is_superset(unsafe_math | NotNaN | NotInf) {
-        "-cl-unsafe-math-optimizations -cl-finite-math-only"
-    } else if modes.is_superset(unsafe_math) {
-        "-cl-unsafe-math-optimizations"
-    } else {
-        match (
-            modes.contains(AllowContraction),
-            modes.contains(UnsignedZero),
-        ) {
-            (true, true) => "-cl-mad-enable -cl-no-signed-zeros",
-            (true, false) => "-cl-mad-enable",
-            (false, true) => "-cl-no-signed-zeros",
-            (false, false) => "",
-        }
-    }
+    [
+        (EnumSet::only(AllowContraction), "-cl-mad-enable"),
+        (EnumSet::only(UnsignedZero), "-cl-no-signed-zeros"),
+        (NotNaN | NotInf, "-cl-finite-math-only"),
+        (unsafe_math, "-cl-unsafe-math-optimizations"),
+        (FastMath::all(), "-cl-fast-relaxed-math"),
+    ]
+    .into_iter()
+    .filter(|(needs, _)| modes.is_superset(*needs))
+    .map(|(_, flag)| flag)
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 /// A kernel object, released with the last clone.
@@ -226,7 +221,7 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
                 backtrace: BackTrace::capture(),
             })?;
         let (has_dynamic_meta, has_info) = (repr.has_dynamic_meta, repr.has_info);
-        let options = relaxed_options(repr.fast_math).to_string();
+        let options = relaxed_options(repr.fast_math);
         let cube_dim = lowered.cube_dim;
         let mut entry = OpenClCacheEntry {
             io: lowered.io.take(),
