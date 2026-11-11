@@ -68,6 +68,14 @@ impl From<ClError> for LaunchError {
 }
 
 impl ClError {
+    /// The error of a `cl3` call `call` that returned `code`.
+    pub(crate) fn of(call: &'static str) -> impl FnOnce(cl_int) -> Self {
+        move |code| Self {
+            call,
+            code: Some(code),
+        }
+    }
+
     /// A failed wait for the device's work. A command that failed, or a device the driver gave up
     /// on (Intel's answers `CL_OUT_OF_RESOURCES` from then on, after a GPU hang or a page fault),
     /// poisons the device.
@@ -188,12 +196,10 @@ pub(crate) unsafe fn launch(
 ///
 /// `queue` is live.
 pub(crate) unsafe fn marker(queue: cl_command_queue) -> Result<Event, ClError> {
-    let mut event = ptr::null_mut();
-    status(
-        api().clEnqueueMarkerWithWaitList(queue, 0, ptr::null(), &mut event),
-        "clEnqueueMarkerWithWaitList",
-    )?;
-    Ok(Event(event))
+    // SAFETY: as the function's; no events to wait for.
+    unsafe { cl3::command_queue::enqueue_marker_with_wait_list(queue, 0, ptr::null()) }
+        .map(Event)
+        .map_err(ClError::of("clEnqueueMarkerWithWaitList"))
 }
 
 /// Makes `queue`'s later commands wait for `event`.
@@ -220,18 +226,12 @@ pub(crate) unsafe fn barrier(queue: cl_command_queue) -> Result<(), ClError> {
     )
 }
 
-/// # Safety
-///
-/// `queue` is live.
-pub(crate) unsafe fn flush(queue: cl_command_queue) -> Result<(), ClError> {
-    status(api().clFlush(queue), "clFlush")
+pub(crate) fn flush(queue: cl_command_queue) -> Result<(), ClError> {
+    cl3::command_queue::flush(queue).map_err(ClError::of("clFlush"))
 }
 
-/// # Safety
-///
-/// `queue` is live.
-pub(crate) unsafe fn finish(queue: cl_command_queue) -> Result<(), ClError> {
-    status(api().clFinish(queue), "clFinish")
+pub(crate) fn finish(queue: cl_command_queue) -> Result<(), ClError> {
+    cl3::command_queue::finish(queue).map_err(ClError::of("clFinish"))
 }
 
 /// Sets argument `index` of `kernel` to the bytes of `value` (a buffer handle, a struct by value).

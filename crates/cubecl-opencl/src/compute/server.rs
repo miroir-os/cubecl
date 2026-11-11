@@ -205,8 +205,7 @@ impl Drop for OpenClServer {
         let ids: Vec<_> = self.streams.stream_ids().collect();
         for id in ids {
             if let Some(stream) = self.streams.try_stream_mut(&id)
-                // SAFETY: the stream's own queue.
-                && let Err(err) = unsafe { cl::finish(stream.queue.raw) }
+                && let Err(err) = cl::finish(stream.queue.raw)
             {
                 log::warn!("{err}");
             }
@@ -369,8 +368,7 @@ impl Server for OpenClServer {
 
     fn flush(&mut self, stream_id: StreamId) -> Result<(), ServerError> {
         let mut command = self.command(stream_id, [].into_iter())?;
-        // SAFETY: the stream's own queue.
-        Ok(unsafe { cl::flush(command.stream().queue.raw) }?)
+        Ok(cl::flush(command.stream().queue.raw)?)
     }
 
     fn start_profile(&mut self, stream_id: StreamId) -> Result<ProfilingToken, ServerError> {
@@ -417,8 +415,7 @@ impl Server for OpenClServer {
         };
         let span = (|| {
             let mut resolved = self.streams.resolve(origin, std::iter::empty())?;
-            // SAFETY: the stream's own queue.
-            unsafe { cl::flush(resolved.current().queue.raw) }?;
+            cl::flush(resolved.current().queue.raw)?;
             last.wait().map_err(ClError::into_sync)?;
             let start = first.time_ns(CL_PROFILING_COMMAND_START)?;
             let end = last.time_ns(CL_PROFILING_COMMAND_END)?;

@@ -20,7 +20,8 @@ use opencl_sys::{
     CL_KERNEL_PROGRAM, CL_PROGRAM_BINARIES, CL_PROGRAM_BUILD_LOG, cl_context, cl_device_id,
     cl_kernel, cl_program,
 };
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
+use std::ptr;
 use std::sync::Arc;
 
 /// The build options every kernel gets: `OpenCL` C 3.0.
@@ -267,15 +268,7 @@ impl OpenClArtifactCompiler {
             cl3::program::create_program_with_binary(self.context, &[self.device], &[binary])
         }
         .ok()?;
-        let kernel =
-            cl3::program::build_program(program, &[self.device], c"", None, std::ptr::null_mut())
-                .ok()
-                .and_then(|()| CString::new(entrypoint_name).ok())
-                .and_then(|name| cl3::kernel::create_kernel(program, &name).ok())
-                .map(KernelHandle);
-        // The kernel holds its own reference to the program.
-        cl::api().clReleaseProgram(program);
-        kernel
+        self.kernel(program, c"", entrypoint_name).ok()
     }
 
     /// Builds `source` for this compiler's device with [`OPTIONS`] and `options`, and takes its
@@ -286,22 +279,30 @@ impl OpenClArtifactCompiler {
         options: &str,
         entrypoint_name: &str,
     ) -> Result<KernelHandle, CompilationError> {
-        let generic = |reason: String| CompilationError::Generic {
-            reason,
-            backtrace: BackTrace::capture(),
-        };
-        let program = cl3::program::create_program_with_source(self.context, &[source])
-            .map_err(|code| generic(format!("clCreateProgramWithSource failed ({code})")))?;
-        let options = CString::new(format!("{OPTIONS} {options}"))
-            .map_err(|_| generic(format!("build options {options:?} hold a NUL")))?;
-        let built = cl3::program::build_program(
-            program,
-            &[self.device],
-            &options,
-            None,
-            std::ptr::null_mut(),
-        );
-        let result = match built {
+        CString::new(format!("{OPTIONS} {options}"))
+            .map_err(|_| format!("build options {options:?} hold a NUL"))
+            .and_then(|options| {
+                let program = cl3::program::create_program_with_source(self.context, &[source])
+                    .map_err(|code| format!("clCreateProgramWithSource failed ({code})"))?;
+                self.kernel(program, &options, entrypoint_name)
+            })
+            .map_err(|reason| CompilationError::Generic {
+                reason: format!("{reason}\n{source}"),
+                backtrace: BackTrace::capture(),
+            })
+    }
+
+    /// Builds `program` with `options` and takes its kernel `entrypoint_name`, releasing the
+    /// program (the kernel holds its own reference).
+    fn kernel(
+        &self,
+        program: cl_program,
+        options: &CStr,
+        entrypoint_name: &str,
+    ) -> Result<KernelHandle, String> {
+        let built =
+            cl3::program::build_program(program, &[self.device], options, None, ptr::null_mut());
+        let kernel = match built {
             Err(code) => {
                 let log = cl3::program::get_program_build_data(
                     program,
@@ -314,23 +315,22 @@ impl OpenClArtifactCompiler {
                         .to_string()
                 })
                 .unwrap_or_default();
-                Err(generic(format!(
-                    "OpenCL build of {entrypoint_name} failed ({code}):\n{log}\n{source}"
-                )))
+                Err(format!(
+                    "OpenCL build of {entrypoint_name} failed ({code}):\n{log}"
+                ))
             }
             Ok(()) => CString::new(entrypoint_name)
-                .map_err(|_| generic(format!("kernel name {entrypoint_name:?} holds a NUL")))
+                .map_err(|_| format!("kernel name {entrypoint_name:?} holds a NUL"))
                 .and_then(|name| {
                     cl3::kernel::create_kernel(program, &name)
                         .map(KernelHandle)
                         .map_err(|code| {
-                            generic(format!("clCreateKernel({entrypoint_name}) failed ({code})"))
+                            format!("clCreateKernel({entrypoint_name}) failed ({code})")
                         })
                 }),
         };
-        // The kernel holds its own reference to the program.
-        crate::compute::cl::api().clReleaseProgram(program);
-        result
+        cl::api().clReleaseProgram(program);
+        kernel
     }
 }
 

@@ -280,10 +280,7 @@ impl Metadata {
             )
         }
         .map(Self)
-        .map_err(|code| ClError {
-            call: "clCreateBuffer",
-            code: Some(code),
-        })
+        .map_err(ClError::of("clCreateBuffer"))
     }
 }
 

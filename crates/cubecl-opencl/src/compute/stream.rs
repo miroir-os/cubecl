@@ -50,8 +50,7 @@ unsafe impl Send for OpenClStream {}
 
 impl Drop for OpenClStream {
     fn drop(&mut self) {
-        // SAFETY: the stream's own queue, alive until released below.
-        if unsafe { cl::finish(self.queue.raw) }.is_err() {
+        if cl::finish(self.queue.raw).is_err() {
             // Copies from the host data may still run: leaked rather than freed under them.
             core::mem::forget(core::mem::take(&mut self.drop_queue));
         }
@@ -88,8 +87,7 @@ impl OpenClStream {
         }
         self.batch_ops.set(0);
         self.batch.set((2 * self.batch.get()).min(LAST_BATCH));
-        // SAFETY: the stream's own queue.
-        unsafe { cl::flush(self.queue.raw) }
+        cl::flush(self.queue.raw)
     }
 
     /// The host waits for the stream: its next commands start the device early again.
@@ -112,14 +110,12 @@ impl Queue {
     /// Orders the queue's later commands after its earlier ones.
     pub(crate) fn barrier(self) -> Result<(), ClError> {
         // SAFETY: a live stream's queue.
-        unsafe {
-            if self.barriers
-                && let Err(err) = cl::barrier(self.raw)
-            {
-                // Nothing orders the command before the next one: wait for it instead.
-                let _ = cl::finish(self.raw);
-                return Err(err);
-            }
+        if self.barriers
+            && let Err(err) = unsafe { cl::barrier(self.raw) }
+        {
+            // Nothing orders the command before the next one: wait for it instead.
+            let _ = cl::finish(self.raw);
+            return Err(err);
         }
         Ok(())
     }
@@ -139,8 +135,7 @@ impl Queue {
             unsafe { self.memory.copy(self.raw, false, dst, src, len) }
         });
         if enqueued.is_err() {
-            // SAFETY: a live stream's queue.
-            let _ = unsafe { cl::finish(self.raw) };
+            let _ = cl::finish(self.raw);
         }
         enqueued
     }
@@ -154,7 +149,7 @@ pub struct Marker(Result<Event, ClError>);
 impl Marker {
     pub(crate) fn on(queue: cl_command_queue) -> Self {
         // SAFETY: a live stream's queue.
-        Self(unsafe { cl::marker(queue).and_then(|event| cl::flush(queue).map(|()| event)) })
+        Self(unsafe { cl::marker(queue) }.and_then(|event| cl::flush(queue).map(|()| event)))
     }
 }
 
@@ -231,10 +226,7 @@ impl EventStreamBackend for OpenClStreamBackend {
                 properties.as_ptr(),
             )
         }
-        .map_err(|code| ClError {
-            call: "clCreateCommandQueueWithProperties",
-            code: Some(code),
-        })?;
+        .map_err(ClError::of("clCreateCommandQueueWithProperties"))?;
         let storage = OpenClStorage::new(
             self.memory,
             self.context,
