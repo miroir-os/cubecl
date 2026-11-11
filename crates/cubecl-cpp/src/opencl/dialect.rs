@@ -1,4 +1,4 @@
-use cubecl_core::ir::dialect::synchronization::{SyncOp, SyncScope};
+use cubecl_core::ir::dialect::synchronization::{SyncOp, SyncPlaneStorageOp, SyncScope};
 
 macro_rules! opencl_op {
     ($ty: ty, $impl: expr) => {
@@ -50,4 +50,9 @@ opencl_op!(SyncOp, |op, ctx| {
         SyncScope::Unit => "",
     }
     .into()
+});
+
+// A plane barrier ordering global memory too: the subgroup's storage writes, for its own units.
+opencl_op!(SyncPlaneStorageOp, |_, _| {
+    "sub_group_barrier(CLK_GLOBAL_MEM_FENCE | CLK_LOCAL_MEM_FENCE);\n".into()
 });
