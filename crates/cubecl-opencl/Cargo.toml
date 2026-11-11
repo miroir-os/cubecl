@@ -24,7 +24,7 @@ cubecl-common = { workspace = true }
 cubecl-environment = { workspace = true }
 cubecl-core = { workspace = true }
 cubecl-ir = { workspace = true }
-cubecl-server = { workspace = true }
+cubecl-server = { workspace = true, features = ["storage-bytes"] }
 cubecl-cpp = { workspace = true, default-features = true, features = ["opencl"] }
 
 # The OpenCL library is loaded at run time (the ICD loader): nothing to link, on any platform.

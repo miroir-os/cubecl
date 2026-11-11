@@ -104,7 +104,7 @@ impl DeviceService for OpenClServer {
 
         let logger = std::sync::Arc::new(cubecl_server::logging::ServerLogger::default());
         let allocator = ContiguousMemoryLayoutPolicy::new(mem_props.alignment as usize);
-        let (utilities, _captures) = cubecl_core::server::ServerUtilities::init(
+        let (utilities, captures) = cubecl_core::server::ServerUtilities::init(
             cubecl_common::device::ServiceId::of::<Self>(device_id),
             "opencl",
             props,
@@ -133,6 +133,7 @@ impl DeviceService for OpenClServer {
             mem_props,
             MemoryConfiguration::default(),
             logger,
+            captures,
         );
         OpenClServer::new(context, kernels, streams, std::sync::Arc::new(utilities))
     }
