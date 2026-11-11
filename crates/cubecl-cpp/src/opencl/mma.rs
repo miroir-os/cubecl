@@ -43,13 +43,6 @@ fn unsupported<T>(ctx: &Context, what: String, fallback: T) -> T {
     fallback
 }
 
-fn lanes(ctx: &Context) -> usize {
-    ctx.aux_ty::<CompilationOptions>()
-        .opencl
-        .subgroup_size
-        .unwrap_or(8) as usize
-}
-
 /// The element kind: bits and signedness (f = float).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Elem {
@@ -60,59 +53,91 @@ enum Elem {
     I32,
 }
 
-fn elem(ctx: &Context, ty: &MatrixType) -> Elem {
-    let elem = ty.elem_ty;
-    if elem.is_float16(ctx) {
-        Elem::F16
-    } else if elem.is_float32(ctx) {
-        Elem::F32
-    } else if elem.size(ctx) == 1 {
-        if elem.is_signed_int(ctx) {
-            Elem::I8
+impl Elem {
+    fn of(ctx: &Context, ty: &MatrixType) -> Self {
+        let elem = ty.elem_ty;
+        if elem.is_float16(ctx) {
+            Self::F16
+        } else if elem.is_float32(ctx) {
+            Self::F32
+        } else if elem.size(ctx) == 1 {
+            if elem.is_signed_int(ctx) {
+                Self::I8
+            } else {
+                Self::U8
+            }
+        } else if elem.size(ctx) == 4 && elem.is_int(ctx) {
+            Self::I32
         } else {
-            Elem::U8
+            let what = format!("DPAS fragment of {}", elem.to_cpp(ctx));
+            unsupported(ctx, what, Self::F32)
         }
-    } else if elem.size(ctx) == 4 && elem.is_int(ctx) {
-        Elem::I32
-    } else {
-        unsupported(
-            ctx,
-            format!("DPAS fragment of {}", elem.to_cpp(ctx)),
-            Elem::F32,
-        )
+    }
+
+    /// The scalar a fragment's memory is read as.
+    fn memory(self) -> &'static str {
+        match self {
+            Self::F16 => "ushort",
+            Self::F32 => "float",
+            Self::I8 | Self::U8 => "uchar",
+            Self::I32 => "int",
+        }
     }
 }
 
-/// The `OpenCL` vector a lane keeps its part of a fragment in.
-fn fragment(ctx: &Context, ty: &MatrixType) -> &'static str {
-    match (ty.ident, elem(ctx, ty), lanes(ctx)) {
-        (MatrixIdent::Accumulator, Elem::I32, _) => "int8",
-        (MatrixIdent::Accumulator, _, _) => "float8",
-        // unsigned 8-bit operands are unsigned vectors (`intel_sub_group_u8_*`)
-        (MatrixIdent::A, Elem::U8, 16) => "ushort8",
-        (MatrixIdent::A, _, 16) => "short8",
-        (_, Elem::U8, _) => "uint8",
-        _ => "int8",
-    }
+/// How a lane keeps its part of a fragment, by matrix, element kind and subgroup width.
+struct Fragment {
+    ident: MatrixIdent,
+    elem: Elem,
+    /// The subgroup's lanes: the tile's width.
+    lanes: usize,
+    /// The `OpenCL` vector a lane keeps its part in (`int8`), and its scalar (`int`).
+    vector: &'static str,
+    scalar: &'static str,
+    /// The inputs a scalar packs (VNNI): 1 in an accumulator.
+    packing: usize,
+    /// K of a tile of these inputs: 32 bytes along K.
+    k: usize,
 }
 
-/// K of a tile of `kind` inputs: 32 bytes along K.
-fn k_native(kind: Elem) -> usize {
-    match kind {
-        Elem::I8 | Elem::U8 => 32,
-        _ => 16,
+impl Fragment {
+    fn of(ctx: &Context, ty: &MatrixType) -> Self {
+        let options = &ctx.aux_ty::<CompilationOptions>().opencl;
+        let (elem, lanes) = (
+            Elem::of(ctx, ty),
+            options.subgroup_size.unwrap_or(8) as usize,
+        );
+        // (vector, scalar, the scalar's bytes); unsigned 8-bit operands are unsigned vectors
+        // (`intel_sub_group_u8_*`)
+        let (vector, scalar, bytes) = match (ty.ident, elem, lanes) {
+            (MatrixIdent::Accumulator, Elem::I32, _) => ("int8", "int", 4),
+            (MatrixIdent::Accumulator, _, _) => ("float8", "float", 4),
+            (MatrixIdent::A, Elem::U8, 16) => ("ushort8", "ushort", 2),
+            (MatrixIdent::A, _, 16) => ("short8", "short", 2),
+            (_, Elem::U8, _) => ("uint8", "uint", 4),
+            _ => ("int8", "int", 4),
+        };
+        let input = match elem {
+            Elem::I8 | Elem::U8 => 1,
+            _ => 2,
+        };
+        Self {
+            ident: ty.ident,
+            elem,
+            lanes,
+            vector,
+            scalar,
+            packing: match ty.ident {
+                MatrixIdent::Accumulator => 1,
+                _ => (bytes / input).max(1),
+            },
+            k: 32 / input,
+        }
     }
-}
-
-/// The scalar of a fragment's vector (`int8` -> `int`).
-fn fragment_scalar(ctx: &Context, ty: &MatrixType) -> &'static str {
-    fragment(ctx, ty).trim_end_matches('8')
 }
 
 opencl_ty!(MatrixType, |ty, ctx| {
     let MatrixShape { m, n, k } = ty.shape;
-    let s = lanes(ctx);
-    let k_native = k_native(elem(ctx, ty));
     if !ctx.aux_ty::<CompilationOptions>().opencl.dpas {
         return unsupported(
             ctx,
@@ -120,20 +145,22 @@ opencl_ty!(MatrixType, |ty, ctx| {
             String::new(),
         );
     }
+    let f = Fragment::of(ctx, ty);
     // Every fragment is declared with its type: the one place to refuse what DPAS lacks.
-    let supported = match ty.ident {
-        MatrixIdent::Accumulator => matches!(elem(ctx, ty), Elem::F32 | Elem::F16 | Elem::I32),
-        _ => matches!(elem(ctx, ty), Elem::F16 | Elem::I8 | Elem::U8),
+    let supported = match f.ident {
+        MatrixIdent::Accumulator => matches!(f.elem, Elem::F32 | Elem::F16 | Elem::I32),
+        _ => matches!(f.elem, Elem::F16 | Elem::I8 | Elem::U8),
     };
     if !supported {
         let what = format!("{:?} fragment of {}", ty.ident, ty.elem_ty.to_cpp(ctx));
         return unsupported(ctx, what, String::new());
     }
-    if m != ROWS || n != s || (ty.ident != MatrixIdent::Accumulator && k != k_native) {
+    let (s, k_native) = (f.lanes, f.k);
+    if m != ROWS || n != s || (f.ident != MatrixIdent::Accumulator && k != k_native) {
         let what = format!("{m}x{n}x{k} fragments (DPAS tiles are {ROWS}x{s}x{k_native} here)");
         return unsupported(ctx, what, String::new());
     }
-    fragment(ctx, ty).into()
+    f.vector.into()
 });
 
 opencl_op!(DeclareMatrixOp, |op, ctx| {
@@ -146,23 +173,22 @@ opencl_op!(DeclareMatrixOp, |op, ctx| {
 
 opencl_op!(FillOp, |op, ctx| {
     let mat = op.matrix(ctx).name(ctx);
-    let value = op.value(ctx).name(ctx);
-    let ty = matrix_ty(ctx, op.matrix(ctx));
-    let frag = fragment(ctx, &ty);
-    let fill = match (ty.ident, elem(ctx, &ty), lanes(ctx)) {
-        (MatrixIdent::Accumulator, Elem::I32, _) => format!("(int8)({value})"),
-        (MatrixIdent::Accumulator, _, _) => format!("(float8)((float)({value}))"),
-        (MatrixIdent::A, Elem::F16, 16) => format!("(short8)(as_short({value}))"),
-        (MatrixIdent::A, Elem::I8 | Elem::U8, 16) => {
-            let scalar = fragment_scalar(ctx, &ty);
-            format!("({frag})(as_{scalar}((char2)({value}, {value})))")
+    let value = op.value(ctx).name(ctx).to_string();
+    let f = Fragment::of(ctx, &matrix_ty(ctx, op.matrix(ctx)));
+    let (vector, scalar) = (f.vector, f.scalar);
+    let fill = match (f.ident, f.elem) {
+        (MatrixIdent::Accumulator, Elem::I32) => format!("(int8)({value})"),
+        (MatrixIdent::Accumulator, _) => format!("(float8)((float)({value}))"),
+        // The value repeated over a scalar's inputs.
+        (_, Elem::F16 | Elem::I8 | Elem::U8) => {
+            let input = if f.elem == Elem::F16 { "half" } else { "char" };
+            let packed = match f.packing {
+                1 => value,
+                n => format!("({input}{n})({})", vec![value; n].join(", ")),
+            };
+            format!("({vector})(as_{scalar}({packed}))")
         }
-        (_, Elem::F16, _) => format!("(int8)(as_int((half2)({value}, {value})))"),
-        (_, Elem::I8 | Elem::U8, _) => {
-            let scalar = fragment_scalar(ctx, &ty);
-            format!("({frag})(as_{scalar}((char4)({value}, {value}, {value}, {value})))")
-        }
-        _ => unsupported(ctx, format!("{frag} fill of this type"), String::new()),
+        _ => unsupported(ctx, format!("{vector} fill of this type"), String::new()),
     };
     format!("*{mat} = {fill};\n")
 });
@@ -226,14 +252,8 @@ impl Source {
 
 opencl_op!(LoadOp, |op, ctx| {
     let ty = matrix_ty(ctx, op.matrix(ctx));
-    let kind = elem(ctx, &ty);
-    let scalar = match kind {
-        Elem::F16 => "ushort",
-        Elem::F32 => "float",
-        Elem::I8 | Elem::U8 => "uchar",
-        Elem::I32 => "int",
-    };
-    let (p, space) = scalar_ptr(ctx, op.source(ctx), scalar);
+    let f = Fragment::of(ctx, &ty);
+    let (p, space) = scalar_ptr(ctx, op.source(ctx), f.elem.memory());
     if space == AddressSpace::Local {
         // Block reads take global or local memory.
         return unsupported(
@@ -248,103 +268,75 @@ opencl_op!(LoadOp, |op, ctx| {
         stride: op.stride(ctx).name(ctx).to_string(),
         packed: constant(ctx, op.stride(ctx)),
     };
-    let value = match ty.ident {
-        MatrixIdent::A => load_a(ctx, &ty, kind, &source),
-        MatrixIdent::B => load_b(ctx, &ty, kind, &source),
-        MatrixIdent::Accumulator => load_accumulator(ctx, &ty, kind, &source, op.layout(ctx).0),
+    let col_major = matches!(ty.layout, MatrixLayout::ColMajor);
+    let value = match f.ident {
+        MatrixIdent::A => load_a(&f, col_major, &source),
+        MatrixIdent::B => load_b(&f, col_major, &source),
+        MatrixIdent::Accumulator => load_accumulator(
+            &f,
+            matches!(op.layout(ctx).0, MatrixLayout::ColMajor),
+            &source,
+        ),
     };
     format!("*{} = {value};\n", op.matrix(ctx).name(ctx))
 });
 
-fn load_a(ctx: &Context, ty: &MatrixType, kind: Elem, source: &Source) -> String {
-    let (frag, scalar) = (fragment(ctx, ty), fragment_scalar(ctx, ty));
-    let wide = lanes(ctx) == 8;
+fn load_a(f: &Fragment, col_major: bool, source: &Source) -> String {
+    let (frag, scalar, n) = (f.vector, f.scalar, f.packing);
     let Source { p, stride, .. } = source;
-    if !matches!(ty.layout, MatrixLayout::ColMajor) {
-        // Rows packed (stride = K): the whole tile in one block read.
-        if source.packed == Some(k_native(kind) as u64) {
-            return format!(
-                "as_{frag}({})",
-                source.tile(if wide { "uint" } else { "ushort" })
-            );
+    if !col_major {
+        // Row m: its K inputs, one block read (S = 8: an int per lane; S = 16: a short); rows
+        // packed (stride = K), the whole tile in one.
+        let read = if f.lanes == 8 { "uint" } else { "ushort" };
+        if source.packed == Some(f.k as u64) {
+            return format!("as_{frag}({})", source.tile(read));
         }
-        // Row m: its K inputs, one block read (S = 8: an int per lane; S = 16: a short).
-        let read = if wide { "uint" } else { "ushort" };
         let rows = components(|m| format!("as_{scalar}({})", source.row(read, m)));
         return format!("({frag})({rows})");
     }
-    // Column-major: lane l gathers its columns, eight rows each.
-    let columns = |count: usize, vector: &str| {
-        (0..count)
-            .map(|c| {
-                format!("{vector} c{c} = vload8(0, {p} + ({count} * {LANE} + {c}) * {stride});")
-            })
-            .join(" ")
-    };
-    match (kind, wide) {
-        (Elem::F16, true) => format!(
-            "({{ {} (int8)({}); }})",
-            columns(2, "ushort8"),
-            components(|m| format!("as_int((ushort2)(c0.s{m}, c1.s{m}))"))
-        ),
-        (Elem::F16, false) => format!("as_short8(vload8(0, {p} + {LANE} * {stride}))"),
-        (_, true) => format!(
-            "({{ {} ({frag})({}); }})",
-            columns(4, "uchar8"),
-            components(|m| format!("as_{scalar}((uchar4)(c0.s{m}, c1.s{m}, c2.s{m}, c3.s{m}))"))
-        ),
-        (_, false) => format!(
-            "({{ {} ({frag})({}); }})",
-            columns(2, "uchar8"),
-            components(|m| format!("as_{scalar}((uchar2)(c0.s{m}, c1.s{m}))"))
-        ),
+    // Column-major: lane l gathers its columns, eight rows each, `n` inputs to a scalar.
+    if n == 1 {
+        return format!("as_{frag}(vload8(0, {p} + {LANE} * {stride}))");
     }
+    let read = f.elem.memory();
+    let columns = (0..n)
+        .map(|c| format!("{read}8 c{c} = vload8(0, {p} + ({n} * {LANE} + {c}) * {stride});"))
+        .join(" ");
+    let packed = components(|m| {
+        let parts = (0..n).map(|c| format!("c{c}.s{m}")).join(", ");
+        format!("as_{scalar}(({read}{n})({parts}))")
+    });
+    format!("({{ {columns} ({frag})({packed}); }})")
 }
 
-fn load_b(ctx: &Context, ty: &MatrixType, kind: Elem, source: &Source) -> String {
-    let (frag, scalar) = (fragment(ctx, ty), fragment_scalar(ctx, ty));
+fn load_b(f: &Fragment, col_major: bool, source: &Source) -> String {
+    let (frag, scalar, n) = (f.vector, f.scalar, f.packing);
     let Source {
         p, space, stride, ..
     } = source;
-    if matches!(ty.layout, MatrixLayout::ColMajor) {
+    if col_major {
         // Column-major: lane l's column is contiguous, already VNNI.
         let space = crate::opencl::ty::ptr_space(*space);
         return format!("as_{frag}(vload8(0, (({space} const uint*)({p} + {LANE} * {stride}))))");
     }
     // Row-major: one block read per K row, packed in pairs (16-bit) or fours (8-bit).
-    let (read, per_int) = match kind {
-        Elem::F16 => ("ushort", 2),
-        _ => ("uchar", 4),
-    };
-    let rows = (0..8 * per_int)
+    let read = f.elem.memory();
+    let rows = (0..8 * n)
         .map(|k| format!("{read} r{k} = {};", source.row(read, k)))
         .join(" ");
     let packed = components(|j| {
-        let parts = (0..per_int)
-            .map(|i| format!("r{}", per_int * j + i))
-            .join(", ");
-        match per_int {
-            2 => format!("as_int((ushort2)({parts}))"),
-            _ => format!("as_{scalar}((uchar4)({parts}))"),
-        }
+        let parts = (0..n).map(|i| format!("r{}", n * j + i)).join(", ");
+        format!("as_{scalar}(({read}{n})({parts}))")
     });
-    let frag = if per_int == 2 { "int8" } else { frag };
     format!("({{ {rows} ({frag})({packed}); }})")
 }
 
-fn load_accumulator(
-    ctx: &Context,
-    ty: &MatrixType,
-    kind: Elem,
-    source: &Source,
-    layout: MatrixLayout,
-) -> String {
-    let frag = fragment(ctx, ty);
+fn load_accumulator(f: &Fragment, col_major: bool, source: &Source) -> String {
     let Source {
         p, space, stride, ..
     } = source;
-    if matches!(layout, MatrixLayout::ColMajor) {
-        return match kind {
+    if col_major {
+        return match f.elem {
             Elem::F16 => {
                 let space = crate::opencl::ty::ptr_space(*space);
                 format!("vload_half8(0, (({space} const half*){p}) + {LANE} * {stride})")
@@ -353,37 +345,32 @@ fn load_accumulator(
         };
     }
     // Rows packed (stride = the tile's width): the whole tile in one block read.
-    if kind != Elem::F16 && source.packed == Some(lanes(ctx) as u64) {
-        return format!("as_{frag}({})", source.tile("uint"));
+    if f.elem != Elem::F16 && source.packed == Some(f.lanes as u64) {
+        return format!("as_{}({})", f.vector, source.tile("uint"));
     }
-    let rows = components(|m| match kind {
+    let rows = components(|m| match f.elem {
         Elem::F16 => format!("convert_float(as_half({}))", source.row("ushort", m)),
-        Elem::I32 => format!("as_int({})", source.row("uint", m)),
-        _ => format!("as_float({})", source.row("uint", m)),
+        _ => format!("as_{}({})", f.scalar, source.row("uint", m)),
     });
-    format!("({frag})({rows})")
+    format!("({})({rows})", f.vector)
 }
 
 opencl_op!(StoreOp, |op, ctx| {
     let mat = op.matrix(ctx).name(ctx);
     let stride = op.stride(ctx).name(ctx);
-    let ty = matrix_ty(ctx, op.matrix(ctx));
-    if ty.ident != MatrixIdent::Accumulator {
+    let f = Fragment::of(ctx, &matrix_ty(ctx, op.matrix(ctx)));
+    if f.ident != MatrixIdent::Accumulator {
         return unsupported(ctx, "store of an A or B fragment".into(), String::new());
     }
-    let kind = elem(ctx, &ty);
-    // Accumulators are f32, f16 or i32 (checked where they are declared).
-    let scalar = match kind {
-        Elem::F16 => "half",
-        Elem::I32 => "int",
-        _ => "float",
-    };
+    let kind = f.elem;
+    // Accumulators are f32, f16 (kept as `float`, stored as `half`) or i32.
+    let scalar = if kind == Elem::F16 { "half" } else { f.scalar };
     let (p, space) = scalar_ptr(ctx, op.destination(ctx), scalar);
     let row_major = !matches!(op.layout(ctx).0, MatrixLayout::ColMajor);
     if row_major
         && space == AddressSpace::Shared
         && kind != Elem::F16
-        && constant(ctx, op.stride(ctx)) == Some(lanes(ctx) as u64)
+        && constant(ctx, op.stride(ctx)) == Some(f.lanes as u64)
     {
         // Rows packed (stride = the tile's width): the whole tile in one block write.
         return format!("intel_sub_group_block_write8((__local uint*)({p}), as_uint8(*{mat}));\n");
@@ -427,7 +414,7 @@ opencl_op!(ElementwiseOp, |op, ctx| {
             String::new(),
         );
     }
-    let (narrow, widen) = match elem(ctx, &ty) {
+    let (narrow, widen) = match Elem::of(ctx, &ty) {
         Elem::F16 => ("convert_half", "convert_float"),
         _ => ("", ""),
     };
@@ -452,19 +439,21 @@ opencl_op!(MultiplyAccumulateOp, |op, ctx| {
     let b = op.mat_b(ctx).name(ctx);
     let c = op.mat_c(ctx).name(ctx);
     let d = op.mat_d(ctx).name(ctx);
-    let a_ty = matrix_ty(ctx, op.mat_a(ctx));
-    let b_ty = matrix_ty(ctx, op.mat_b(ctx));
-    let d_ty = matrix_ty(ctx, op.mat_d(ctx));
+    let (a_ty, b_ty) = (matrix_ty(ctx, op.mat_a(ctx)), matrix_ty(ctx, op.mat_b(ctx)));
+    let (fa, eb) = (Fragment::of(ctx, &a_ty), Elem::of(ctx, &b_ty));
     // Inputs are f16, i8 or u8 (checked where they are declared).
     let name = |e: Elem| match e {
         Elem::I8 => "i8",
         Elem::U8 => "u8",
         _ => "f16",
     };
-    let (ea, eb) = (elem(ctx, &a_ty), elem(ctx, &b_ty));
-    let k = k_native(ea);
-    let mad = format!("intel_sub_group_{}_{}_matrix_mad_k{k}", name(ea), name(eb));
-    let result = match elem(ctx, &d_ty) {
+    let mad = format!(
+        "intel_sub_group_{}_{}_matrix_mad_k{}",
+        name(fa.elem),
+        name(eb),
+        fa.k
+    );
+    let result = match Elem::of(ctx, &matrix_ty(ctx, op.mat_d(ctx))) {
         // A 16-bit accumulator rounds as it would be stored.
         Elem::F16 => format!("convert_float8(convert_half8_rte({mad}(*{a}, *{b}, *{c})))"),
         _ => format!("{mad}(*{a}, *{b}, *{c})"),
@@ -482,7 +471,7 @@ opencl_op!(CastOp, |op, ctx| {
     if from.ident != MatrixIdent::Accumulator || to.ident != MatrixIdent::Accumulator {
         return unsupported(ctx, "cast of an A or B fragment".into(), String::new());
     }
-    let value = match (elem(ctx, &from), elem(ctx, &to)) {
+    let value = match (Elem::of(ctx, &from), Elem::of(ctx, &to)) {
         (_, Elem::F16) => format!("convert_float8(convert_half8_rte(*{input}))"),
         (Elem::I32, Elem::F32) => format!("convert_float8(*{input})"),
         // Toward zero, as CUDA's `int(x)` per element.
