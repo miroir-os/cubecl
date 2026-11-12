@@ -1814,6 +1814,168 @@ pub fn test_cmma_tile_product<
     }
 }
 
+/// `out = lhs rhs + acc` on one tile, each operand in its own layout and read from (or written to)
+/// rows (row major) or columns (column major) `PAD` elements longer than the tile's, the product
+/// into a fragment other than the accumulator's.
+#[cube(launch)]
+#[allow(clippy::too_many_arguments)]
+pub fn kernel_tile_layouts<AB: Numeric, CD: Numeric>(
+    lhs: &[AB],
+    rhs: &[AB],
+    acc: &[CD],
+    out: &mut [CD],
+    #[comptime] m: usize,
+    #[comptime] n: usize,
+    #[comptime] k: usize,
+    #[comptime] layouts: TileLayouts,
+) {
+    let [la, lb, lc, ld] = comptime![layouts.layouts];
+    let [sa, sb, sc, sd] = comptime![layouts.strides];
+    let a = cmma::Matrix::<AB>::from_slice(MatrixIdent::A, m, n, k, la, lhs, sa);
+    let b = cmma::Matrix::<AB>::from_slice(MatrixIdent::B, m, n, k, lb, rhs, sb);
+    let c = cmma::Matrix::<CD>::from_slice(MatrixIdent::Accumulator, m, n, k, lc, acc, sc);
+    let d = unsafe {
+        cmma::Matrix::<CD>::uninitialized(
+            MatrixIdent::Accumulator,
+            m,
+            n,
+            k,
+            MatrixLayout::Undefined,
+        )
+    };
+    cmma::execute(&a, &b, &c, &d);
+    cmma::store(out, &d, sd, ld);
+}
+
+/// Padding past each row or column of [`kernel_tile_layouts`]' operands.
+const PAD: usize = 4;
+
+/// The layouts of `A`, `B`, the accumulator loaded and the result stored, and their strides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TileLayouts {
+    pub layouts: [MatrixLayout; 4],
+    pub strides: [u32; 4],
+}
+
+/// The elements between the starts of a `rows` x `columns` operand's rows, or columns.
+fn tile_stride(layout: MatrixLayout, rows: usize, columns: usize) -> usize {
+    match layout {
+        MatrixLayout::ColMajor => rows + PAD,
+        _ => columns + PAD,
+    }
+}
+
+/// Where cell (`row`, `column`) of an operand is.
+fn tile_index(layout: MatrixLayout, stride: usize, row: usize, column: usize) -> usize {
+    match layout {
+        MatrixLayout::ColMajor => column * stride + row,
+        _ => row * stride + column,
+    }
+}
+
+/// A tile product with every operand row and column major, from and into padded rows or columns,
+/// equals the CPU's exactly (small whole numbers, as in [`test_cmma_tile_product`]).
+pub fn test_cmma_tile_layouts<
+    R: Runtime,
+    AB: CubeElement + Numeric + NumCast,
+    CD: CubeElement + Numeric + NumCast,
+>(
+    client: Client,
+    cube_dimensions: CubeDim,
+    (m, n, k): (usize, usize, usize),
+) {
+    if !client.features().matmul.cmma.contains(&MmaConfig {
+        a_type: AB::cube_type(),
+        b_type: AB::cube_type(),
+        cd_type: CD::cube_type(),
+        m: m as u32,
+        n: n as u32,
+        k: k as u32,
+    }) {
+        return;
+    }
+    let (row, col) = (MatrixLayout::RowMajor, MatrixLayout::ColMajor);
+    let signed = AB::from(-1i64).is_some();
+    let small =
+        |index: usize, salt: usize| ((index * 7 + salt) % 9) as i64 - if signed { 4 } else { 0 };
+    for layouts in [
+        [row, col, row, row],
+        [col, row, col, col],
+        [row, row, col, row],
+        [col, col, row, col],
+    ] {
+        let [la, lb, lc, ld] = layouts;
+        let operand = |layout, rows, columns, salt| {
+            let stride = tile_stride(layout, rows, columns);
+            let mut values = vec![0i64; stride * if layout == col { columns } else { rows }];
+            let mut cells = vec![0i64; rows * columns];
+            for r in 0..rows {
+                for c in 0..columns {
+                    let value = small(r * columns + c, salt);
+                    values[tile_index(layout, stride, r, c)] = value;
+                    cells[r * columns + c] = value;
+                }
+            }
+            (values, cells)
+        };
+        let (lhs, a) = operand(la, m, k, 3);
+        let (rhs, b) = operand(lb, k, n, 5);
+        let (acc, c) = operand(lc, m, n, 1);
+        let typed =
+            |values: &[i64]| -> Vec<AB> { values.iter().map(|&v| AB::from(v).unwrap()).collect() };
+        let acc: Vec<CD> = acc.iter().map(|&v| CD::from(v).unwrap()).collect();
+        let d_stride = tile_stride(ld, m, n);
+        let len = d_stride * if ld == col { n } else { m };
+        let out = client.empty(len * size_of::<CD>());
+        unsafe {
+            kernel_tile_layouts::launch::<AB, CD>(
+                &client,
+                CubeCount::Static(1, 1, 1),
+                cube_dimensions,
+                BufferArg::from_raw_parts(
+                    client.create_from_slice(AB::as_bytes(&typed(&lhs))),
+                    lhs.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    client.create_from_slice(AB::as_bytes(&typed(&rhs))),
+                    rhs.len(),
+                ),
+                BufferArg::from_raw_parts(client.create_from_slice(CD::as_bytes(&acc)), acc.len()),
+                BufferArg::from_raw_parts(out.clone(), len),
+                m,
+                n,
+                k,
+                TileLayouts {
+                    layouts,
+                    strides: [
+                        tile_stride(la, m, k),
+                        tile_stride(lb, k, n),
+                        tile_stride(lc, m, n),
+                        d_stride,
+                    ]
+                    .map(|stride| stride as u32),
+                },
+            )
+        };
+        let actual = client.read_one_unchecked(out);
+        let actual = CD::from_bytes(&actual);
+        for r in 0..m {
+            for col_ in 0..n {
+                let expected =
+                    (0..k).map(|l| a[r * k + l] * b[l * n + col_]).sum::<i64>() + c[r * n + col_];
+                let got = actual[tile_index(ld, d_stride, r, col_)].to_f64().unwrap();
+                assert_eq!(
+                    got,
+                    expected as f64,
+                    "{:?} into {:?}, {m}x{n}x{k}, layouts {layouts:?}: out[{r}][{col_}]",
+                    AB::cube_type(),
+                    CD::cube_type(),
+                );
+            }
+        }
+    }
+}
+
 /// Spreads `index` over both signs and the normal exponents both FP8 formats hold.
 fn scattered_fp8_operand(index: usize) -> f32 {
     let mixed = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
@@ -3164,6 +3326,40 @@ macro_rules! testgen_cmma {
             test::<e4m3, e5m2, f32>();
             test::<e5m2, e4m3, f32>();
             test::<e5m2, e5m2, f32>();
+        }
+
+        #[$crate::runtime_tests::test_log::test]
+        fn test_cmma_tile_layouts() {
+            use half::{bf16, f16};
+
+            fn test<
+                AB: CubeElement + Numeric + cubecl_core::num_traits::cast::NumCast,
+                CD: CubeElement + Numeric + cubecl_core::num_traits::cast::NumCast,
+            >() {
+                for shape in [
+                    (16, 16, 32),
+                    (16, 32, 16),
+                    (32, 16, 16),
+                    (16, 32, 32),
+                    (32, 16, 32),
+                    (32, 32, 16),
+                    (32, 32, 32),
+                ] {
+                    let client = TestRuntime::client(&Default::default());
+                    let cube_dimensions = cube_dim::<TestRuntime>(&client);
+                    cubecl_core::runtime_tests::cmma::test_cmma_tile_layouts::<
+                        TestRuntime,
+                        AB,
+                        CD,
+                    >(client, cube_dimensions, shape)
+                }
+            }
+
+            test::<f16, f32>();
+            test::<f16, f16>();
+            test::<bf16, f32>();
+            test::<i8, i32>();
+            test::<u8, i32>();
         }
 
         #[$crate::runtime_tests::test_log::test]
