@@ -101,7 +101,12 @@ impl KernelFn {
             .fast_math
             .as_ref()
             .map(|value| {
-                let fast_math = frontend_type("fast_math_expand");
+                // a kernel's modes are its program's (`OpenCL` builds per program), a function's only its own
+                let fast_math = frontend_type(if self.args.is_launch() {
+                    "kernel_fast_math_expand"
+                } else {
+                    "fast_math_expand"
+                });
                 quote![#fast_math(scope, #value, |scope| {#body})]
             })
             .unwrap_or_else(|| quote![#body]);

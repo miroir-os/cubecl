@@ -2,7 +2,7 @@ use cubecl_core::ir::{
     dialect::{
         bitwise::{CountOnesOp, LeadingZerosBitsOp, ReverseBitsOp, TrailingZerosBitsOp},
         general::{CastOp, ReinterpretCastOp},
-        math::FAbsOp,
+        math::{ArcSinOp, FAbsOp},
     },
     interfaces::TypedExt,
     prelude::*,
@@ -53,6 +53,14 @@ opencl_op_with_out!(ReinterpretCastOp, |op, ctx| {
 
 call!(FAbsOp, "fabs", input);
 
+// Intel's compiler answers NaN for `asin(±1)` in a program built with
+// `-cl-unsafe-math-optimizations` (see the runtime's fast-math build options). The arctangent of x
+// over its cosine is ±π/2 there and NaN past ±1, as `asin` is; it is emitted for every device and
+// program alike, and may round differently from the device's `asin` elsewhere.
+opencl_op_with_out!(ArcSinOp, |op, ctx| {
+    let x = op.input(ctx).name(ctx);
+    format!("atan2({x}, sqrt((1 - {x}) * (1 + {x})))")
+});
 call!(CountOnesOp, "popcount", input);
 call!(LeadingZerosBitsOp, "clz", input);
 call!(TrailingZerosBitsOp, "ctz", input);

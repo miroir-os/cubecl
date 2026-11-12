@@ -5,7 +5,10 @@ use crate::OpenClCompiler;
 use crate::compute::cl;
 use cl3::info_type::InfoType;
 use cubecl_core::server::LaunchError;
-use cubecl_core::{ir::DeviceProperties, prelude::*};
+use cubecl_core::{
+    ir::{DeviceProperties, EnumSet},
+    prelude::*,
+};
 use cubecl_cpp::opencl::OpenClCompilationOptions;
 use cubecl_environment::backtrace::BackTrace;
 use cubecl_server::compiler::{
@@ -23,7 +26,35 @@ use std::ptr;
 use std::sync::Arc;
 
 /// The build options every kernel gets: `OpenCL` C 3.0.
-const OPTIONS: &CStr = c"-cl-std=CL3.0";
+const OPTIONS: &str = "-cl-std=CL3.0";
+
+/// The `OpenCL` build options for a kernel written for the fast-math modes `modes` (`CubeCL`'s
+/// `fast_math`, which `OpenCL` sets per program: a helper inside the kernel is relaxed with it): each
+/// flag whose relaxations the modes allow (`OpenCL` takes the redundant ones). Contraction takes no
+/// flag: `FP_CONTRACT` is on by default (`OpenCL` C 3.0, 6.15.2.1), and `-cl-mad-enable` would allow
+/// less accuracy than contracting to a fused multiply-add.
+fn relaxed_options(modes: EnumSet<FastMath>) -> String {
+    use FastMath::*;
+    // (`-cl-unsafe-math-optimizations` may assume valid arguments and results and lose precision)
+    let unsafe_math = AllowContraction
+        | AllowReassociation
+        | AllowReciprocal
+        | UnsignedZero
+        | NotNaN
+        | NotInf
+        | ReducedPrecision;
+    [
+        (EnumSet::only(UnsignedZero), "-cl-no-signed-zeros"),
+        (NotNaN | NotInf, "-cl-finite-math-only"),
+        (unsafe_math, "-cl-unsafe-math-optimizations"),
+        (FastMath::all(), "-cl-fast-relaxed-math"),
+    ]
+    .into_iter()
+    .filter(|(needs, _)| modes.is_superset(*needs))
+    .map(|(_, flag)| flag)
+    .collect::<Vec<_>>()
+    .join(" ")
+}
 
 /// A kernel object, released with the last clone.
 #[derive(Debug)]
@@ -71,6 +102,8 @@ pub(crate) struct OpenClCacheEntry {
     /// loading it takes the driver milliseconds, building `source` again up to a second.
     #[serde(with = "serde_bytes")]
     binary: Vec<u8>,
+    /// The build options past [`OPTIONS`] (the kernel's fast-math modes, [`relaxed_options`]).
+    options: String,
     io: Option<Vec<BufferIOAttr>>,
     has_dynamic_meta: bool,
     has_info: bool,
@@ -132,7 +165,7 @@ impl OpenClArtifactCompiler {
         let cube_dim = entry.cube_dim.into();
         let kernel = match self.load_binary(&entry.binary, &entry.entrypoint_name) {
             Some(kernel) => kernel,
-            None => self.build(&entry.source, &entry.entrypoint_name)?,
+            None => self.build(&entry.source, &entry.options, &entry.entrypoint_name)?,
         };
         Ok(OpenClKernel {
             kernel: Arc::new(kernel),
@@ -197,6 +230,7 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
                 backtrace: BackTrace::capture(),
             })?;
         let (has_dynamic_meta, has_info) = (repr.has_dynamic_meta, repr.has_info);
+        let options = relaxed_options(repr.fast_math);
         let cube_dim = lowered.cube_dim;
         let mut entry = OpenClCacheEntry {
             io: lowered.io.take(),
@@ -204,6 +238,7 @@ impl ArtifactCompiler for OpenClArtifactCompiler {
             cube_dim: (cube_dim.x, cube_dim.y, cube_dim.z),
             source: lowered.source,
             binary: Vec::new(),
+            options,
             has_dynamic_meta,
             has_info,
         };
@@ -239,12 +274,21 @@ impl OpenClArtifactCompiler {
         self.kernel(program, c"", entrypoint_name).ok()
     }
 
-    /// Builds `source` for this compiler's device with [`OPTIONS`], and takes its kernel
-    /// `entrypoint_name`. A kernel that cannot run its cube's units is refused at launch.
-    fn build(&self, source: &str, entrypoint_name: &str) -> Result<KernelHandle, CompilationError> {
-        cl3::program::create_program_with_source(self.context, &[source])
-            .map_err(|code| format!("clCreateProgramWithSource failed ({code})"))
-            .and_then(|program| self.kernel(program, OPTIONS, entrypoint_name))
+    /// Builds `source` for this compiler's device with [`OPTIONS`] and `options`, and takes its
+    /// kernel `entrypoint_name`. A kernel that cannot run its cube's units is refused at launch.
+    fn build(
+        &self,
+        source: &str,
+        options: &str,
+        entrypoint_name: &str,
+    ) -> Result<KernelHandle, CompilationError> {
+        CString::new(format!("{OPTIONS} {options}"))
+            .map_err(|_| format!("build options {options:?} hold a NUL"))
+            .and_then(|options| {
+                let program = cl3::program::create_program_with_source(self.context, &[source])
+                    .map_err(|code| format!("clCreateProgramWithSource failed ({code})"))?;
+                self.kernel(program, &options, entrypoint_name)
+            })
             .map_err(|reason| CompilationError::Generic {
                 reason: format!("{reason}\n{source}"),
                 backtrace: BackTrace::capture(),

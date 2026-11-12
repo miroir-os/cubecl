@@ -386,6 +386,7 @@ where
             source,
             has_info,
             has_dynamic_meta,
+            fast_math: ctx.aux_ty::<cubecl_core::ir::GlobalState>().kernel_fp_math,
         };
 
         dump.write("module.cpp", || {
